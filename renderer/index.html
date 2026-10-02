@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; script-src 'self'" />
+  <title>Shuriken</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <aside class="sidebar">
+    <div class="brand"><span id="brandLogo"></span><div><div class="word">Shuriken</div><small>AI mod forge</small></div></div>
+    <div class="section-label">My games <span class="link" id="libraryLink">Library</span></div>
+    <div class="game-list" id="gameList"></div>
+    <div class="section-label">Manage</div>
+    <nav class="nav" id="nav"></nav>
+    <div class="sidebar-foot"><span class="dot"></span><span id="foot">Shuriken</span></div>
+  </aside>
+  <div class="main">
+    <header class="topbar">
+      <div>
+        <h1 id="pageTitle">Dashboard</h1>
+        <div class="sub" id="pageSub"></div>
+      </div>
+      <div class="spacer"></div>
+      <select class="input" id="profileSelect" title="Profile"></select>
+      <span class="pill" id="deployPill"><span class="dot"></span><span id="deployText">-</span></span>
+      <button class="btn" id="deployBtn">Deploy</button>
+      <button class="btn play" id="playBtn">▶ Play</button>
+    </header>
+    <section class="content" id="content"></section>
+  </div>
+  <div class="toasts" id="toasts"></div>
+  <div class="drop-overlay" id="dropOverlay">Drop to install</div>
+  <script src="markdown.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

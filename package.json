@@ -1,0 +1,72 @@
+{
+  "name": "shuriken",
+  "productName": "Shuriken",
+  "version": "0.3.1",
+  "description": "Shuriken: AI-powered multi-game mod manager, modpack assembler and mod workshop.",
+  "main": "main.js",
+  "author": "Shuriken",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "selftest": "electron . --selftest",
+    "dist": "electron-builder --win nsis portable --publish never",
+    "dist:portable": "electron-builder --win portable --publish never"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "latest",
+    "7zip-bin": "^5.2.0",
+    "fast-xml-parser": "^4.5.0"
+  },
+  "devDependencies": {
+    "electron": "^37.0.0",
+    "electron-builder": "^26.0.0"
+  },
+  "build": {
+    "appId": "app.shuriken.desktop",
+    "productName": "Shuriken",
+    "directories": {
+      "output": "dist"
+    },
+    "publish": [
+      {
+        "provider": "generic",
+        "url": "https://localhost/modforge-updates"
+      }
+    ],
+    "files": [
+      "main.js",
+      "preload.js",
+      "src/**/*",
+      "renderer/**/*",
+      "assets/**/*",
+      "package.json"
+    ],
+    "asarUnpack": [
+      "node_modules/7zip-bin/**/*",
+      "src/core/scripts/**/*"
+    ],
+    "win": {
+      "icon": "assets/icon.png",
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "shortcutName": "Shuriken"
+    },
+    "portable": {
+      "artifactName": "Shuriken-Portable-${version}.exe"
+    },
+    "protocols": [
+      {
+        "name": "Nexus Mods download",
+        "schemes": [
+          "nxm"
+        ]
+      }
+    ]
+  }
+}
