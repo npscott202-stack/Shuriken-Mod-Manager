@@ -287,3 +287,8 @@ label.field { display: flex; flex-direction: column; gap: 6px; font-size: 11px; 
 .log-view { background: #0b0b11; border: 1px solid var(--line); border-radius: 9px; padding: 12px; font-family: Consolas, monospace; font-size: 12px; white-space: pre-wrap; max-height: 60vh; overflow: auto; }
 .lightbox { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.85); display: grid; place-items: center; z-index: 70; cursor: zoom-out; }
 .lightbox img { max-width: 92vw; max-height: 92vh; border-radius: 9px; }
+
+.msg-actions { margin-top: 6px; opacity: 0.55; transition: opacity 0.15s; }
+.msg.assistant:hover .msg-actions { opacity: 1; }
+.btn.danger { color: #fff; background: linear-gradient(180deg, #ff4b5e, #c51d33); border-color: #ff5a6c; }
+.btn.ghost.danger, .btn.small.danger { background: transparent; color: var(--err); border-color: transparent; }

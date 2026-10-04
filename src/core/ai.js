@@ -16,7 +16,7 @@ const beth = require('./integrations/bethesda');
 const mcx = require('./integrations/minecraft');
 const workshop = require('./workshop');
 const library = require('./library');
-const localai = require('./localai');
+const engine = require('./engine');
 const thunderstore = require('./sources/thunderstore');
 
 // Does a tool apply to this game? games: undefined (all), a kind, a game id, or 'thunderstore'.
@@ -337,7 +337,7 @@ async function runTool(gameId, name, input, ctx) {
       return { installed: done, note: 'Deploy to apply.' };
     }
     case 'deploy': {
-      const res = mods.deploy(gameId);
+      const res = await mods.deploy(gameId);
       ctx.onChange?.();
       return res;
     }
@@ -526,6 +526,7 @@ function provider(cfg) {
 async function send({ chatId, gameId, text, images = [] }, emit, approve) {
   if (!chats.has(chatId)) chats.set(chatId, { gameId, messages: [] });
   const chat = chats.get(chatId);
+  chat.abort = new AbortController();
   const cfgAll = settings();
   if (provider(cfgAll) === 'local') return sendLocal({ chat, gameId, text, images }, emit, approve, cfgAll);
   const content = [];
@@ -549,7 +550,7 @@ async function send({ chatId, gameId, text, images = [] }, emit, approve) {
       cache_control: { type: 'ephemeral' },
       betas: ['server-side-fallback-2026-07-01'],
       fallbacks: 'default',
-    });
+    }, { signal: chat.abort.signal });
     stream.on('streamEvent', (ev) => {
       if (ev.type === 'content_block_start') {
         const b = ev.content_block;
@@ -577,10 +578,15 @@ async function send({ chatId, gameId, text, images = [] }, emit, approve) {
 
     const results = [];
     for (const tu of toolUses) {
+      if (chat.abort.signal.aborted) {
+        results.push({ type: 'tool_result', tool_use_id: tu.id, content: 'Stopped by the user.' });
+        continue;
+      }
       const r = await executeTool({ gameId, name: tu.name, input: tu.input, id: tu.id, cfg, emit, approve, ctx });
       results.push({ type: 'tool_result', tool_use_id: tu.id, content: r.content, ...(r.isError ? { is_error: true } : {}) });
     }
     chat.messages.push({ role: 'user', content: results });
+    if (chat.abort.signal.aborted) break;
     emit({ type: 'turn' });
   }
   emit({ type: 'done' });
@@ -626,14 +632,19 @@ function localTools(g) {
 }
 
 // Keeps the conversation inside the local model's context window.
-function trimLocalHistory(messages, budget = 14000) {
-  let size = messages.reduce((n, m) => n + (m.content?.length || 0), 0);
+function trimLocalHistory(messages, budget = 24000) {
+  const len = (m) => (typeof m.content === 'string' ? m.content.length : (m.content || []).reduce((n, p) => n + (p.text?.length || 2000), 0));
+  let size = messages.reduce((n, m) => n + len(m), 0);
   for (let i = 1; i < messages.length - 4 && size > budget; i++) {
     const m = messages[i];
-    if ((m.role === 'tool' || m.images) && m.content && m.content.length > 300) {
+    if (Array.isArray(m.content)) {
+      // Drop old screenshots but keep the words.
+      size -= len(m);
+      m.content = `${m.content.filter((p) => p.type === 'text').map((p) => p.text).join(' ')} [screenshot removed to save memory]`;
+      size += len(m);
+    } else if (m.role === 'tool' && m.content && m.content.length > 300) {
       size -= m.content.length - 60;
       m.content = '[older result trimmed to save memory]';
-      delete m.images;
     }
   }
 }
@@ -651,32 +662,32 @@ function shrinkForLocal(base64) {
 }
 
 async function sendLocal({ chat, gameId, text, images }, emit, approve, cfg) {
-  const model = cfg.localModel || localai.DEFAULT_MODEL;
-  const st = await localai.status(model);
-  if (!st.installed) throw new Error('Shuriken Local AI needs Ollama (free). Install it from ollama.com, then open Settings → AI.');
-  if (!st.running) throw new Error('The local AI engine (Ollama) is not running and could not be started.');
-  if (!st.ready) throw new Error(`The local model "${model}" is not downloaded yet. Open Settings → AI and click Download.`);
-  const caps = st.capabilities;
+  const modelId = engine.MODELS[cfg.localModel] ? cfg.localModel : engine.DEFAULT_MODEL;
+  const st = await engine.status(modelId);
+  if (!st.ready) throw new Error('Shuriken AI is not set up yet. Open Settings → AI assistant and click "Set up Shuriken AI" (one-time download).');
+  if (!st.running) emit({ type: 'status', text: 'Starting Shuriken AI (first answer takes a little longer)…' });
   if (!chat.local) chat.local = [{ role: 'system', content: LOCAL_PROMPT }];
-  const userMsg = { role: 'user', content: `${contextLine(gameId)}\n\n${text || '(see screenshots)'}` };
-  if (images.length) {
-    if (caps.includes('vision')) userMsg.images = images.map((i) => shrinkForLocal(i.data));
-    else userMsg.content += '\n\n(The user attached screenshots, but this local model cannot see images. Ask them to describe what it shows.)';
-  }
-  chat.local.push(userMsg);
+  const parts = [{ type: 'text', text: `${contextLine(gameId)}\n\n${text || '(see screenshots)'}` }];
+  for (const img of images) parts.push({ type: 'image_url', image_url: { url: `data:image/jpeg;base64,${shrinkForLocal(img.data)}` } });
+  chat.local.push({ role: 'user', content: images.length ? parts : parts[0].text });
   const g = mods.game(gameId);
-  const tools = caps.includes('tools') ? localTools(g) : undefined;
+  const tools = localTools(g);
   const ctx = { onChange: () => emit({ type: 'state-changed' }) };
 
   for (let turn = 0; turn < 25; turn++) {
+    if (chat.abort?.signal.aborted) break;
     trimLocalHistory(chat.local);
-    const msg = await localai.chatTurn({ model, messages: chat.local, tools, think: caps.includes('thinking') }, emit);
-    chat.local.push({ role: 'assistant', content: msg.content, ...(msg.tool_calls ? { tool_calls: msg.tool_calls } : {}) });
+    const msg = await engine.chatTurn({ modelId, messages: chat.local, tools, signal: chat.abort?.signal }, emit);
+    chat.local.push({ role: 'assistant', content: msg.content || '', ...(msg.tool_calls ? { tool_calls: msg.tool_calls } : {}) });
     if (!msg.tool_calls?.length) break;
-    for (const [i, call] of msg.tool_calls.entries()) {
+    for (const call of msg.tool_calls) {
+      if (chat.abort?.signal.aborted) {
+        chat.local.push({ role: 'tool', tool_call_id: call.id, content: 'Stopped by the user.' });
+        continue;
+      }
       const name = call.function?.name;
-      const r = await executeTool({ gameId, name, input: call.function?.arguments, id: `local-${Date.now()}-${i}`, cfg, emit, approve, ctx, maxChars: 5000 });
-      chat.local.push({ role: 'tool', tool_name: name, content: r.isError ? `ERROR: ${r.content}` : r.content });
+      const r = await executeTool({ gameId, name, input: call.function?.arguments, id: call.id, cfg, emit, approve, ctx, maxChars: 6000 });
+      chat.local.push({ role: 'tool', tool_call_id: call.id, content: r.isError ? `ERROR: ${r.content}` : r.content });
     }
     emit({ type: 'turn' });
   }
@@ -693,8 +704,13 @@ function friendlyError(e) {
   return e.message || String(e);
 }
 
+function stop(chatId) {
+  chats.get(chatId)?.abort?.abort();
+}
+
 function reset(chatId) {
+  stop(chatId);
   chats.delete(chatId);
 }
 
-module.exports = { send, reset, friendlyError, TOOL_DEFS, provider };
+module.exports = { send, stop, reset, friendlyError, TOOL_DEFS, provider };

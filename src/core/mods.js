@@ -509,7 +509,20 @@ function removeEmptyParents(file, stopAt) {
   }
 }
 
-function deploy(gameId, onProgress = () => {}) {
+const deploying = new Set();
+
+// Only one deploy/purge per game at a time.
+async function deploy(gameId, onProgress = () => {}) {
+  if (deploying.has(gameId)) throw new Error('A deploy is already running for this game.');
+  deploying.add(gameId);
+  try {
+    return await deployUnlocked(gameId, onProgress);
+  } finally {
+    deploying.delete(gameId);
+  }
+}
+
+async function deployUnlocked(gameId, onProgress) {
   const g = game(gameId);
   if (!g.installDir) throw new Error(`Set the ${g.name} folder first.`);
   const s = state(gameId);
@@ -566,7 +579,11 @@ function deploy(gameId, onProgress = () => {}) {
       copied++;
     }
     next[key] = { target: want.target, source: want.source, mod: want.mod, backup, method };
-    if (++done % 200 === 0) onProgress({ done, total });
+    if (++done % 200 === 0) {
+      onProgress({ done, total });
+      // Let the window repaint and other requests run during big deployments.
+      await new Promise((r) => setImmediate(r));
+    }
   }
 
   s.deployment = { files: next, deployedAt: new Date().toISOString(), dirty: false };
@@ -578,6 +595,7 @@ function deploy(gameId, onProgress = () => {}) {
 }
 
 function purge(gameId) {
+  if (deploying.has(gameId)) throw new Error('A deploy is running for this game; try again in a moment.');
   const g = game(gameId);
   const s = state(gameId);
   let removed = 0;

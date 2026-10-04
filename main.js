@@ -8,9 +8,25 @@ const store = require('./src/core/store');
 const { GAMES, CORE, detectAll, detectMinecraftProfiles, publicInfo } = require('./src/core/games');
 
 let win = null;
-let mods, plugins, archives, diagnostics, tools, ai, downloads, modrinth, nexus, loaders, workshop, mcx, beth, localai, thunderstore;
+let mods, plugins, archives, diagnostics, tools, ai, downloads, modrinth, nexus, loaders, workshop, mcx, beth, engine, thunderstore;
 
 const pendingApprovals = new Map();
+
+// Appends errors to <data>/logs/shuriken.log so users can send a report.
+function logError(where, err) {
+  try {
+    const text = err?.stack || err?.message || String(err);
+    const file = path.join(app.getPath('userData'), 'logs', 'shuriken.log');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    if (fs.existsSync(file) && fs.statSync(file).size > 2e6) fs.renameSync(file, `${file}.old`);
+    fs.appendFileSync(file, `[${new Date().toISOString()}] ${where}: ${text}
+`);
+  } catch {
+    // logging must never throw
+  }
+}
+process.on('uncaughtException', (e) => logError('main', e));
+process.on('unhandledRejection', (e) => logError('main(promise)', e));
 
 function loadCore() {
   mods = require('./src/core/mods');
@@ -26,7 +42,7 @@ function loadCore() {
   workshop = require('./src/core/workshop');
   mcx = require('./src/core/integrations/minecraft');
   beth = require('./src/core/integrations/bethesda');
-  localai = require('./src/core/localai');
+  engine = require('./src/core/engine');
   thunderstore = require('./src/core/sources/thunderstore');
 }
 
@@ -148,7 +164,7 @@ function findJava() {
 async function launchGame(gameId) {
   const g = mods.game(gameId);
   const s = mods.state(gameId);
-  if (s.deployment.dirty && settings().autoDeployOnLaunch && g.installDir) mods.deploy(gameId);
+  if (s.deployment.dirty && settings().autoDeployOnLaunch && g.installDir) await mods.deploy(gameId);
   if (g.kind === 'minecraft') {
     const launcher = findMinecraftLauncher();
     if (!launcher) throw new Error('Minecraft Launcher not found. Set its path in Settings.');
@@ -156,10 +172,18 @@ async function launchGame(gameId) {
     return { launched: path.basename(launcher) };
   }
   if (!g.installDir) throw new Error(`Set the ${g.name} folder first.`);
-  const loaderExe = path.join(g.installDir, g.loader);
-  const exe = fs.existsSync(loaderExe) ? loaderExe : path.join(g.installDir, g.exe);
-  spawn(exe, [], { cwd: g.installDir, detached: true, stdio: 'ignore' }).unref();
-  return { launched: path.basename(exe) };
+  // Script extender loader first (Bethesda), then the game's own exe, then Steam.
+  const candidates = [g.loader, g.exe].filter(Boolean).map((rel) => path.join(g.installDir, rel));
+  const exe = candidates.find((p) => fs.existsSync(p));
+  if (exe) {
+    spawn(exe, [], { cwd: path.dirname(exe), detached: true, stdio: 'ignore' }).unref();
+    return { launched: path.basename(exe) };
+  }
+  if (g.steamAppId) {
+    await shell.openExternal(`steam://rungameid/${g.steamAppId}`);
+    return { launched: `${g.short} through Steam` };
+  }
+  throw new Error(`Couldn't find how to start ${g.name}. Start it from its own launcher.`);
 }
 
 // ---------- nxm:// ----------
@@ -193,6 +217,7 @@ function handle(channel, fn) {
     try {
       return { ok: true, value: await fn(...args) };
     } catch (e) {
+      logError(channel, e);
       return { ok: false, error: e.message || String(e) };
     }
   });
@@ -468,9 +493,9 @@ function registerIpc() {
   });
   handle('tools:add', (gameId, tool) => tools.add(gameId, tool));
   handle('tools:remove', (gameId, toolId) => tools.remove(gameId, toolId));
-  handle('tools:launch', (gameId, toolId) => {
+  handle('tools:launch', async (gameId, toolId) => {
     const s = mods.state(gameId);
-    if (s.deployment.dirty && settings().autoDeployOnLaunch) mods.deploy(gameId);
+    if (s.deployment.dirty && settings().autoDeployOnLaunch) await mods.deploy(gameId);
     return tools.launch(gameId, toolId);
   });
   handle('tools:xeditClean', (gameId, plugin) => tools.xeditQuickClean(gameId, plugin));
@@ -520,22 +545,80 @@ function registerIpc() {
     const emit = (ev) => send('ai:event', { chatId: req.chatId, ...ev });
     const approve = (request) =>
       new Promise((resolve) => {
-        pendingApprovals.set(request.id, resolve);
+        pendingApprovals.set(request.id, { resolve, chatId: req.chatId });
         emit({ type: 'approval', request });
       });
     try {
       await ai.send(req, emit, approve);
     } catch (e) {
-      emit({ type: 'error', message: ai.friendlyError(e) });
+      if (e?.name === 'AbortError' || /abort/i.test(e?.name || '') || /aborted/i.test(e?.message || '')) emit({ type: 'stopped' });
+      else {
+        logError('ai', e);
+        emit({ type: 'error', message: ai.friendlyError(e) });
+      }
     }
   });
+  const declineApprovals = (chatId) => {
+    for (const [id, p] of pendingApprovals) {
+      if (p.chatId !== chatId) continue;
+      p.resolve(false);
+      pendingApprovals.delete(id);
+    }
+  };
   handle('ai:approve', (id, ok) => {
-    pendingApprovals.get(id)?.(!!ok);
+    pendingApprovals.get(id)?.resolve(!!ok);
     pendingApprovals.delete(id);
   });
-  handle('ai:reset', (chatId) => ai.reset(chatId));
-  handle('localai:status', () => localai.status(settings().localModel || localai.DEFAULT_MODEL));
-  handle('localai:pull', (model) => localai.pull(model || localai.DEFAULT_MODEL, (ev) => send('localai:progress', ev)));
+  handle('ai:stop', (chatId) => {
+    ai.stop(chatId);
+    declineApprovals(chatId);
+  });
+  handle('ai:reset', (chatId) => {
+    declineApprovals(chatId);
+    ai.reset(chatId);
+  });
+  handle('engine:status', () => engine.status(settings().localModel || engine.DEFAULT_MODEL));
+  handle('engine:setup', (modelId) => engine.setup(modelId || settings().localModel || engine.DEFAULT_MODEL, (ev) => send('engine:progress', ev)));
+  handle('engine:remove', (modelId) => engine.removeModel(modelId));
+  handle('engine:stop', () => engine.stop());
+  handle('engine:warm', () => engine.warm(settings().localModel || engine.DEFAULT_MODEL));
+  handle('log:error', (where, message) => logError(`renderer:${where}`, message));
+  handle('logs:open', () => shell.openPath(store.dataDir('logs')));
+  // Text for "Copy bug report": versions, games and the tail of the logs (no keys or personal paths beyond folders).
+  handle('app:bugReport', async () => {
+    const tail = (file, n) => {
+      try {
+        return fs.readFileSync(file, 'utf8').split(/\r?\n/).slice(-n).join('\n');
+      } catch {
+        return '(none)';
+      }
+    };
+    const s = settings();
+    const st = await engine.status(s.localModel || engine.DEFAULT_MODEL).catch((e) => ({ error: e.message }));
+    return [
+      `Shuriken ${app.getVersion()} · Electron ${process.versions.electron} · Windows ${require('os').release()}`,
+      `AI: ${ai.provider(s)} · engine ${st.build || 'not installed'} · model ${st.model} ready=${st.ready} · ${st.device || ''}`,
+      `Games: ${(s.managedGames || []).map((id) => `${id}${mods.state(id).installDir ? '' : '(no folder)'}:${Object.keys(mods.state(id).mods).length} mods`).join(', ')}`,
+      '--- shuriken.log ---',
+      tail(path.join(app.getPath('userData'), 'logs', 'shuriken.log'), 80),
+      '--- engine.log ---',
+      tail(path.join(app.getPath('userData'), 'logs', 'engine.log'), 25),
+    ].join('\n');
+  });
+  // Looks for a newer GitHub release.
+  handle('app:checkUpdate', async () => {
+    const res = await fetch('https://api.github.com/repos/npscott202-stack/Shuriken-Mod-Manager/releases/latest', { headers: { 'User-Agent': 'Shuriken' } });
+    if (!res.ok) return null;
+    const rel = await res.json();
+    const latest = String(rel.tag_name || '').replace(/^v/, '');
+    const newer = (a, b) => {
+      const pa = a.split('.').map(Number);
+      const pb = b.split('.').map(Number);
+      for (let i = 0; i < 3; i++) if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) > (pb[i] || 0);
+      return false;
+    };
+    return newer(latest, app.getVersion()) ? { version: latest, url: rel.html_url } : null;
+  });
 
   handle('shell:open', (target) => {
     if (/^https?:\/\//.test(target)) return shell.openExternal(target);
@@ -561,7 +644,8 @@ async function localAiSelfTest(log) {
   const events = { text: '', tools: [], thinking: 0 };
   const t0 = Date.now();
   try {
-    await ai.send({ chatId: `selftest-${Date.now()}`, gameId: 'fallout4', text: process.env.MODFORGE_LOCALAI_PROMPT || 'Using your tools, tell me how many plugins are active in my Fallout 4 load order and whether there are any load order problems. Keep it short.' },
+    const images = process.env.MODFORGE_LOCALAI_IMAGE ? [{ mediaType: 'image/png', data: fs.readFileSync(process.env.MODFORGE_LOCALAI_IMAGE).toString('base64') }] : [];
+    await ai.send({ chatId: `selftest-${Date.now()}`, gameId: 'fallout4', images, text: process.env.MODFORGE_LOCALAI_PROMPT || 'Using your tools, tell me how many plugins are active in my Fallout 4 load order and whether there are any load order problems. Keep it short.' },
       (ev) => {
         if (ev.type === 'text') events.text += ev.delta;
         if (ev.type === 'thinking') events.thinking += ev.delta.length;
@@ -596,7 +680,7 @@ async function selfTest() {
       t0 = Date.now();
       const r = await thunderstore.install('valheim', 'valheim', hits[0].full);
       log('ts install', `${Math.round((Date.now() - t0) / 1000)}s`, r.map((x) => x.error || `${x.mod.name} ${x.mod.version}`));
-      log('ts deploy', mods.deploy('valheim'));
+      log('ts deploy', await mods.deploy('valheim'));
       const top = (d) => { try { return fs.readdirSync(d); } catch { return []; } };
       log('ts layout root', top(fake).filter((n) => !n.startsWith('_')), 'plugins', top(path.join(fake, 'BepInEx', 'plugins')));
       mods.purge('valheim');
@@ -666,10 +750,10 @@ async function selfTest() {
     const step = mods.fomodVisibleStep(f.fomod.token, 0, {});
     const fm = mods.fomodComplete(f.fomod.token, { 0: { 0: [1] } });
     log('fomod', step, mods.walk(mods.modDir('fallout4', fm.id)));
-    const dep = mods.deploy('fallout4');
+    const dep = await mods.deploy('fallout4');
     log('deploy', dep, fs.readFileSync(path.join(fake, 'Data', 'original.txt'), 'utf8'), fs.existsSync(path.join(fake, 'Data', 'textures', 'b.dds')));
     mods.setEnabled('fallout4', inst.mod.id, false);
-    log('redeploy', mods.deploy('fallout4'), fs.readFileSync(path.join(fake, 'Data', 'original.txt'), 'utf8'));
+    log('redeploy', await mods.deploy('fallout4'), fs.readFileSync(path.join(fake, 'Data', 'original.txt'), 'utf8'));
     log('purge', mods.purge('fallout4'), fs.readdirSync(path.join(fake, 'Data')));
     log('find', mods.findFile('fallout4', 'b.dds'));
     Object.keys(st).forEach((k) => delete st[k]);
@@ -724,7 +808,7 @@ async function selfTest() {
     execFileSync(require('7zip-bin').path7za, ['a', '-tzip', path.join(fakeSv, 'coolmod.zip'), path.join(fakeSv, '_src', 'Wrapper')]);
     const sv = await mods.installFile('stardewvalley', path.join(fakeSv, 'coolmod.zip'), {});
     log('generic install', sv.mod?.type, mods.walk(mods.modDir('stardewvalley', sv.mod.id)));
-    log('generic deploy', mods.deploy('stardewvalley'), fs.existsSync(path.join(fakeSv, 'Mods', 'CoolMod', 'manifest.json')));
+    log('generic deploy', await mods.deploy('stardewvalley'), fs.existsSync(path.join(fakeSv, 'Mods', 'CoolMod', 'manifest.json')));
     log('generic purge', mods.purge('stardewvalley'), fs.existsSync(path.join(fakeSv, 'Mods', 'CoolMod')));
     Object.keys(svState).forEach((k) => delete svState[k]);
     Object.assign(svState, svSaved);
@@ -754,7 +838,7 @@ const legacyData = path.join(app.getPath('appData'), 'ModForge');
 app.setPath('userData', fs.existsSync(legacyData) ? legacyData : path.join(app.getPath('appData'), 'Shuriken'));
 
 const isSelfTest = process.argv.includes('--selftest');
-const isCapture = process.argv.some((a) => a.startsWith('--capture='));
+const isCapture = process.argv.some((a) => a.startsWith('--capture=') || a.startsWith('--smoke='));
 if (!isSelfTest && !isCapture && !app.requestSingleInstanceLock()) {
   app.quit();
 } else {
@@ -806,10 +890,52 @@ if (!isSelfTest && !isCapture && !app.requestSingleInstanceLock()) {
         app.quit();
       });
     }
+    const smokeArg = process.argv.find((a) => a.startsWith('--smoke='));
+    if (smokeArg) {
+      // Dev aid: visits every page for several kinds of games, records console errors, crashed
+      // pages and screenshots, then quits. Results go to <dir>/smoke.json.
+      const dir = smokeArg.slice('--smoke='.length);
+      fs.mkdirSync(dir, { recursive: true });
+      const problems = [];
+      let where = 'startup';
+      win.webContents.on('console-message', (e) => {
+        const level = e.level ?? e.params?.level;
+        const message = e.message ?? e.params?.message;
+        if (level === 'warning' || level === 'error' || level === 2 || level === 3) problems.push({ where, level, message: String(message).slice(0, 2000) });
+      });
+      win.webContents.on('render-process-gone', (_e, d) => problems.push({ where, level: 'crash', message: d.reason }));
+      win.webContents.once('did-finish-load', async () => {
+        const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+        await wait(3000);
+        await win.webContents.executeJavaScript(`console.error('SMOKE-PROBE')`);
+        await wait(200);
+        const games = (process.env.SHURIKEN_SMOKE_GAMES || 'fallout4,starfield,minecraft,sims4,valheim,cyberpunk2077,skyrimse').split(',');
+        const pages = ['library', 'dashboard', 'mods', 'plugins', 'browse', 'downloads', 'ai', 'workshop', 'tools', 'diagnostics', 'settings'];
+        for (const gameId of games) {
+          for (const page of pages) {
+            where = `${gameId}:${page}`;
+            try {
+              await win.webContents.executeJavaScript(`selectGame(${JSON.stringify(gameId)}).then(() => go(${JSON.stringify(page)}))`);
+              await wait(page === 'browse' ? 3500 : 600);
+              const text = await win.webContents.executeJavaScript(`document.querySelector('#content').innerText.slice(0, 400)`);
+              if (/Something went wrong/.test(text)) problems.push({ where, level: 'page', message: text });
+              if (process.env.SHURIKEN_SMOKE_SHOTS) fs.writeFileSync(path.join(dir, `${gameId}-${page}.png`), (await win.webContents.capturePage()).toPNG());
+            } catch (e) {
+              problems.push({ where, level: 'exception', message: e.message });
+            }
+          }
+        }
+        fs.writeFileSync(path.join(dir, 'smoke.json'), JSON.stringify(problems, null, 1));
+        app.quit();
+      });
+    }
     const link = nxmFromArgv(process.argv);
     if (link) win.webContents.once('did-finish-load', () => handleNxm(link));
   });
 
-  app.on('will-quit', () => globalShortcut.unregisterAll());
+  app.on('will-quit', () => {
+    globalShortcut.unregisterAll();
+    engine?.stop();
+  });
   app.on('window-all-closed', () => app.quit());
 }

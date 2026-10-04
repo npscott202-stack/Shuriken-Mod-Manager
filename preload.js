@@ -22,5 +22,5 @@ contextBridge.exposeInMainWorld('shuriken', {
   onToast: on('toast'),
   onNxmInstalled: on('nxm:installed'),
   onScreenshot: on('screenshot:captured'),
-  onLocalAiProgress: on('localai:progress'),
+  onEngineProgress: on('engine:progress'),
 });

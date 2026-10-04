@@ -4,15 +4,15 @@ AI-powered multi-game mod manager, modpack assembler and mod workshop for Window
 
 ## Download
 
-Go to **[Releases](../../releases/latest)** and download `Shuriken-0.3.1-Windows.zip`. Extract it and open **READ FIRST.txt** for the full setup guide.
+Go to **[Releases](../../releases/latest)** and download `Shuriken-0.4.0-Windows.zip`. Extract it and open **READ FIRST.txt** for the full setup guide.
 
 Quick start:
-1. Run `Shuriken Setup 0.3.1.exe`. Windows SmartScreen may warn about an unsigned app: click **More info → Run anyway**.
+1. Run `Shuriken Setup 0.4.0.exe`. Windows SmartScreen may warn about an unsigned app: click **More info → Run anyway**.
 2. Shuriken finds your Steam games automatically. Use **Game Library** for everything else.
-3. For the free AI: **Settings → AI assistant → Shuriken Local AI**, install [Ollama](https://ollama.com/download) if asked, then click **Download** for the model (about 6 GB, one time).
+3. For the free AI: **Settings → AI assistant → Set up Shuriken AI**. Shuriken downloads its built-in engine (llama.cpp, Vulkan) and a Qwen3-VL model once (3–6 GB). No account, no API key, nothing else to install.
 4. Install mods (drag archives in, or use **Get Mods**), click **Deploy**, then **Play**.
 
-Requirements: Windows 10/11 64-bit. The local AI works best with a 6–8 GB GPU and 16 GB RAM.
+Requirements: Windows 10/11 64-bit. The built-in AI works best with a 4–8 GB NVIDIA, AMD or Intel GPU and 16 GB RAM (it also runs on the CPU, slower).
 
 ## Build from source
 
@@ -20,7 +20,7 @@ Requirements: Windows 10/11 64-bit. The local AI works best with a 6–8 GB GPU 
 npm install
 node node_modules/electron/install.js   # npm 11+ blocks Electron's download script
 npm start                               # run from source
-npm run dist                            # dist/Shuriken Setup 0.2.0.exe and dist/Shuriken-Portable-0.2.0.exe
+npm run dist                            # dist/Shuriken Setup <version>.exe and dist/Shuriken-Portable-<version>.exe
 npm run selftest                        # headless checks (fake game folders for install/deploy tests)
 ```
 
@@ -34,7 +34,7 @@ npm run selftest                        # headless checks (fake game folders for
 
 - **Staging + hardlink deployment** (like Vortex): tools such as xEdit, the Creation Kit and LOOT see deployed mods without a virtual file system. Purge restores the original files.
 - **Profiles** keep separate enabled sets, priorities and load orders. **FOMOD** installers get a wizard.
-- **AI assistant** (Claude, your own API key) reads mod lists, load orders, plugin headers, archives, INIs, crash logs and screenshots. It also drives tools:
+- **AI assistant**: the built-in Shuriken AI engine (free, on your PC), or Claude with your own API key. It reads mod lists, load orders, plugin headers, archives, INIs, crash logs and screenshots. It also drives tools:
   - **xEdit:** cleaning and generated scripts.
   - **Creation Kit:** precombines/previs and the Papyrus compiler.
   - **Archives:** packing and unpacking with BSArch and Archive2.

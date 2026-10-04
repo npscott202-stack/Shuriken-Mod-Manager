@@ -148,6 +148,16 @@ async function setManaged(gameId, on) {
   renderChrome();
 }
 
+// Lets the user pick a game folder; returns true only if a folder was actually chosen.
+async function pickGameFolder(g) {
+  const view = await run(() => api.call('game:pickFolder', g.id));
+  if (!view) return false;
+  state.games = state.games.map((x) => (x.id === view.id ? view : x));
+  toast(`${g.short} folder set`, 'success');
+  renderChrome();
+  return true;
+}
+
 async function refreshGame() {
   const g = await api.call('game:get', state.gameId);
   state.games = state.games.map((x) => (x.id === g.id ? g : x));
@@ -209,13 +219,14 @@ async function selectGame(id) {
   localStorage.setItem('shuriken.game', id);
   if (state.page === 'plugins' && game().kind !== 'bethesda') state.page = 'dashboard';
   renderChrome();
-  renderPage();
+  return renderPage();
 }
 
 function go(page) {
   state.page = page;
+  localStorage.setItem('shuriken.page', page);
   renderChrome();
-  renderPage();
+  return renderPage();
 }
 
 async function renderPage() {
@@ -228,6 +239,7 @@ async function renderPage() {
     const el = await fn();
     if (page === state.page && gameId === state.gameId) content.replaceChildren(el);
   } catch (e) {
+    console.error(`[page ${page}] ${e.stack || e.message}`);
     content.replaceChildren(h('div', { class: 'empty' }, h('div', { class: 'big' }, 'Something went wrong'), e.message));
   }
 }
@@ -236,7 +248,7 @@ function needFolder(g) {
   return h('div', { class: 'card empty' },
     h('div', { class: 'big' }, `${g.name} wasn't found automatically`),
     h('p', { class: 'muted' }, g.kind === 'minecraft' ? 'Pick your .minecraft folder or a modpack instance folder.' : `Pick the folder that contains ${g.exe}.`),
-    h('button', { class: 'btn primary', onClick: async () => { await run(() => api.call('game:pickFolder', g.id), 'Game folder set'); await refreshGame(); renderPage(); } }, 'Choose folder…'),
+    h('button', { class: 'btn primary', onClick: async () => { if (await pickGameFolder(g)) renderPage(); } }, 'Choose folder…'),
   );
 }
 
@@ -325,6 +337,11 @@ function fomodWizard(info) {
     }
 
     async function next() {
+      if (current) {
+        const step = info.steps[current.index];
+        const missing = step.groups.find((grp, gi) => ['SelectExactlyOne', 'SelectAtLeastOne'].includes(grp.type) && !(selections[current.index]?.[gi] || []).length);
+        if (missing) return toast(`Choose an option in "${missing.name}" first.`, 'error');
+      }
       const nextInfo = await api.call('fomod:step', info.token, (current?.index ?? -1) + 1, selections);
       if (nextInfo.index === -1) {
         btnNext.disabled = true;
@@ -445,12 +462,9 @@ async function pageLibrary() {
       pin.addEventListener('click', async (e) => { e.stopPropagation(); await setManaged(g.id, !on); draw(); });
       const open = async () => {
         if (!on) await setManaged(g.id, true);
-        if (!g.installDir) {
-          await run(() => api.call('game:pickFolder', g.id), `${g.short} folder set`);
-          await refreshGame();
-        }
+        if (!g.installDir) await pickGameFolder(g);
+        state.page = 'dashboard';
         selectGame(g.id);
-        go('dashboard');
       };
       return h('div', { class: `lib-card ${g.installDir ? '' : 'missing'}`, onClick: open, title: g.name },
         h('div', { class: 'cover', style: artStyle(g, 'cover') }, g.art ? '' : initials(g)),
@@ -479,7 +493,18 @@ function minecraftCard(g) {
     versionSel.replaceChildren(...vs.slice(0, 80).map((v) => h('option', { value: v, selected: v === g.mcVersion }, v)));
     if (!g.mcVersion) versionSel.value = '';
   }).catch(() => {});
+  const loaderBtn = h('button', { class: 'btn', onClick: async () => {
+    if (!versionSel.value) return toast('Pick a Minecraft version first', 'error');
+    loaderBtn.disabled = true;
+    try {
+      const r = await run(() => api.call('loader:install', loaderSel.value, versionSel.value));
+      toast(r.note, 'success', 10000);
+    } finally {
+      loaderBtn.disabled = false;
+    }
+  } }, `Install ${g.loader} loader`);
   const save = async () => {
+    loaderBtn.textContent = `Install ${loaderSel.value} loader`;
     await run(() => api.call('game:setMinecraft', g.id, { mcVersion: versionSel.value, loader: loaderSel.value }), 'Saved');
     refreshGame();
   };
@@ -492,11 +517,7 @@ function minecraftCard(g) {
       h('label', { class: 'field' }, 'Minecraft version', versionSel),
       h('label', { class: 'field' }, 'Mod loader', loaderSel),
       h('div', { class: 'grow' }),
-      h('button', { class: 'btn', onClick: async () => {
-        if (!versionSel.value) return toast('Pick a Minecraft version first', 'error');
-        const r = await run(() => api.call('loader:install', loaderSel.value, versionSel.value));
-        toast(r.note, 'success', 10000);
-      } }, `Install ${loaderSel.value} loader`),
+      loaderBtn,
     ),
     detected.length ? h('div', { class: 'small muted', style: { marginTop: '10px' } }, 'Installed loader profiles: ', detected.map((p) => h('span', { class: 'badge' }, `${p.loader} ${p.mcVersion}`))) : null,
   );
@@ -574,6 +595,17 @@ async function pageMods() {
     ));
   }
 
+  async function setAll(on) {
+    const targets = state.mods.filter((m) => m.enabled !== on);
+    if (!targets.length) return;
+    if (!on && !confirm(`Disable all ${targets.length} enabled mods?`)) return;
+    for (const m of targets) await api.call('mods:setEnabled', g.id, m.id, on);
+    state.mods = await api.call('mods:list', g.id);
+    await refreshGame();
+    rows();
+    toast(`${on ? 'Enabled' : 'Disabled'} ${targets.length} mods. Deploy to apply.`, 'success');
+  }
+  filter.id = 'modFilter';
   filter.addEventListener('input', rows);
   rows();
   showDetail();
@@ -581,11 +613,18 @@ async function pageMods() {
     h('div', { class: 'toolbar' },
       h('button', { class: 'btn primary', onClick: async () => handleInstallResults(await run(() => api.call('mods:installDialog', g.id))) }, '+ Install from file'),
       filter,
+      h('button', { class: 'btn ghost', title: 'Enable every mod in this profile', onClick: () => setAll(true) }, 'Enable all'),
+      h('button', { class: 'btn ghost', title: 'Disable every mod in this profile', onClick: () => setAll(false) }, 'Disable all'),
       h('div', { class: 'grow' }),
       g.kind === 'minecraft'
         ? h('button', { class: 'btn', onClick: async () => { const r = await run(() => api.call('mrpack:export', g.id)); if (r) toast(`Exported ${r.fileCount} Modrinth files to ${r.outFile}`, 'success', 8000); } }, 'Export .mrpack')
         : h('button', { class: 'btn', onClick: async () => { const r = await run(() => api.call('collection:export', g.id)); if (r) toast(`Saved ${r}`, 'success'); } }, 'Export mod list'),
-      h('button', { class: 'btn', onClick: async () => { await run(() => api.call('purge', g.id), 'All mods removed from the game folder'); refreshGame(); } }, 'Purge'),
+      h('button', { class: 'btn', title: 'Remove all deployed mod files from the game folder and restore originals', onClick: async () => {
+        if (!confirm(`Purge ${g.short}? All deployed mod files are removed from the game folder and original files are restored. Your installed mods stay in Shuriken; click Deploy to put them back.`)) return;
+        await run(() => api.call('purge', g.id), 'All mods removed from the game folder');
+        await refreshGame();
+        renderPage();
+      } }, 'Purge'),
     ),
     h('div', { class: 'split' },
       h('div', { class: 'grow' },
@@ -879,7 +918,7 @@ async function pageDownloads() {
   const active = [...state.downloads.values()].filter((d) => d.status === 'downloading');
   return h('div', {},
     active.length ? h('div', { class: 'card', style: { marginBottom: '16px' } }, h('h3', {}, 'Active'),
-      active.map((d) => h('div', { style: { marginBottom: '10px' } }, h('div', { class: 'row' }, h('span', { class: 'grow' }, d.name), h('span', { class: 'faint small' }, d.total ? `${fmtBytes(d.received)} / ${fmtBytes(d.total)}` : fmtBytes(d.received))),
+      active.map((d) => h('div', { style: { marginBottom: '10px' }, 'data-dl': String(d.id) }, h('div', { class: 'row' }, h('span', { class: 'grow' }, d.name), h('span', { class: 'faint small dl-size' }, d.total ? `${fmtBytes(d.received)} / ${fmtBytes(d.total)}` : fmtBytes(d.received))),
         h('div', { class: 'progress' }, h('div', { style: { width: d.total ? `${(100 * d.received) / d.total}%` : '30%' } }))))) : null,
     h('div', { class: 'toolbar' }, h('button', { class: 'btn', onClick: () => api.call('game:openFolder', g.id, 'downloads') }, 'Open downloads folder')),
     h('table', { class: 'table' },
@@ -888,7 +927,7 @@ async function pageDownloads() {
         h('td', { class: 'name' }, f.name), h('td', { class: 'muted' }, fmtBytes(f.size)), h('td', { class: 'muted' }, fmtDate(f.date)),
         h('td', {}, h('div', { class: 'row' },
           h('button', { class: 'btn small primary', onClick: async () => handleInstallResults(await run(() => api.call('mods:installPaths', g.id, [f.path]))) }, `Install to ${g.short}`),
-          h('button', { class: 'btn small ghost danger', onClick: async () => { await api.call('downloads:remove', f.path); renderPage(); } }, 'Delete'))))) : h('tr', {}, h('td', { colspan: 4, class: 'muted' }, 'No downloads yet.'))),
+          h('button', { class: 'btn small ghost danger', onClick: async () => { if (!confirm(`Delete the downloaded file ${f.name}?`)) return; await api.call('downloads:remove', f.path); renderPage(); } }, 'Delete'))))) : h('tr', {}, h('td', { colspan: 4, class: 'muted' }, 'No downloads yet.'))),
     ),
   );
 }
@@ -916,6 +955,17 @@ function pageAi() {
   textarea.value = chat.draft || '';
   const attachments = h('div', { class: 'attachments' });
   const sendBtn = h('button', { class: 'btn primary', onClick: () => sendChat() }, 'Send');
+  const stopBtn = h('button', { class: 'btn danger', style: { display: chat.busy ? '' : 'none' }, onClick: () => stopChat(chat) }, '■ Stop');
+  if (chat.busy) sendBtn.style.display = 'none';
+  const setupBanner = h('div');
+  if (aiProvider() === 'local') {
+    api.call('engine:status').then((st) => {
+      if (st.ready && !st.running) api.call('engine:warm').catch(() => {});
+      if (!st.ready) setupBanner.replaceChildren(h('div', { class: 'issue warning', style: { margin: '12px 24px 0' } }, h('span', { class: 'sev' }),
+        h('div', { class: 'txt' }, 'Shuriken AI needs a one-time setup (free download of the engine and model).'),
+        h('button', { class: 'btn small primary', onClick: () => go('settings') }, 'Set up now')));
+    }).catch(() => {});
+  }
   const autoFix = toggle(state.settings.aiAutoApprove, async (v) => {
     state.settings = await api.call('settings:set', { aiAutoApprove: v });
     toast(v ? 'Auto-fix on: the AI will apply changes without asking (backups are still made).' : 'Auto-fix off: you approve every change.', 'info');
@@ -946,18 +996,19 @@ function pageAi() {
       h('button', { onClick: () => { chat.attachments.splice(i, 1); drawAttachments(); } }, '×'))));
   }
 
-  chatDom = { log, textarea, sendBtn, drawAttachments, chat };
+  chatDom = { log, textarea, sendBtn, stopBtn, drawAttachments, chat };
   drawAttachments();
   drawChat();
 
   return h('div', { class: 'chat' },
     h('div', { class: 'chat-head' },
       logo('avatar'),
-      h('div', {}, h('div', { class: 'name' }, `Shuriken AI · ${g.short}`), h('div', { class: 'faint small' }, `${aiProvider() === 'local' ? `Local AI · ${state.settings.localModel || 'qwen3-vl:8b'} · runs on your PC` : `Claude · ${state.settings.aiModel}`} · reads your mods, load order, logs and screenshots`)),
+      h('div', {}, h('div', { class: 'name' }, `Shuriken AI · ${g.short}`), h('div', { class: 'faint small' }, `${aiProvider() === 'local' ? 'Built-in AI · runs on your PC' : `Claude · ${state.settings.aiModel || 'claude-opus-5-5'}`} · reads your mods, load order, logs and screenshots`)),
       h('div', { class: 'grow' }),
       h('span', { class: 'small muted' }, 'Auto-fix'), autoFix,
-      h('button', { class: 'btn small', onClick: async () => { await api.call('ai:reset', chat.id); state.chats[g.id] = null; renderPage(); } }, 'New chat'),
+      h('button', { class: 'btn small', onClick: async () => { await api.call('ai:reset', chat.id); state.chats[g.id] = null; renderPage(); } }, chat.busy ? 'Stop & new chat' : 'New chat'),
     ),
+    setupBanner,
     log,
     h('div', { class: 'composer' },
       attachments,
@@ -966,8 +1017,9 @@ function pageAi() {
         h('button', { class: 'btn icon ghost', title: 'Capture the screen (hides Shuriken for a moment)', onClick: async () => { chat.attachments.push(await run(() => api.call('screenshot:capture', true))); drawAttachments(); } }, '📸'),
         textarea,
         sendBtn,
+        stopBtn,
       ),
-      aiProvider() === 'claude' && !state.keys.anthropic ? h('div', { class: 'small', style: { color: 'var(--warn)', marginTop: '8px' } }, 'Add your Claude API key in Settings, or switch to the free Local AI.') : null,
+      aiProvider() === 'claude' && !state.keys.anthropic ? h('div', { class: 'small', style: { color: 'var(--warn)', marginTop: '8px' } }, 'Add your Claude API key in Settings, or switch to the free built-in Shuriken AI.') : null,
     ),
   );
 }
@@ -1008,8 +1060,10 @@ function drawChat() {
       h('div', { class: 'suggestions' }, SUGGESTIONS[game().kind].map(([t, p]) => h('div', { class: 'suggestion', onClick: () => { chat.draft = p; chatDom.textarea.value = p; if (!t.includes('screenshot')) sendChat(); else chatDom.textarea.focus(); } }, h('b', {}, t), h('span', { class: 'muted small' }, p)))));
     return;
   }
+  const nearBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 120;
   log.replaceChildren(...chat.items.map(renderItem));
-  log.scrollTop = log.scrollHeight;
+  if (nearBottom || chat.forceScroll) log.scrollTop = log.scrollHeight;
+  chat.forceScroll = false;
 }
 
 function renderItem(item) {
@@ -1040,7 +1094,12 @@ function renderItem(item) {
       ));
     } else if (block.type === 'error') parts.push(h('div', { class: 'issue error' }, h('span', { class: 'sev' }), h('div', { class: 'txt' }, block.text)));
   }
-  if (item.pending) parts.push(h('span', { class: 'cursor muted small' }, item.blocks.length ? '' : 'Working'));
+  if (item.stopped) parts.push(h('div', { class: 'faint small' }, '■ Stopped'));
+  if (item.pending) parts.push(h('span', { class: 'cursor muted small' }, item.status || (item.blocks.length ? '' : 'Working')));
+  const text = item.blocks.filter((b) => b.type === 'text').map((b) => b.text).join(String.fromCharCode(10, 10));
+  if (!item.pending && text) {
+    parts.push(h('div', { class: 'msg-actions' }, h('button', { class: 'btn small ghost', onClick: (e) => { navigator.clipboard.writeText(text); e.target.textContent = 'Copied'; } }, 'Copy')));
+  }
   return h('div', { class: 'msg assistant' }, parts);
 }
 
@@ -1067,10 +1126,11 @@ async function sendChat() {
   chat.draft = '';
   chat.busy = true;
   chat.reply = reply;
+  chat.forceScroll = true;
   if (chatDom?.chat === chat) {
     chatDom.textarea.value = '';
     chatDom.drawAttachments();
-    chatDom.sendBtn.disabled = true;
+    setBusyUi(true);
   }
   drawChat();
   try {
@@ -1079,9 +1139,22 @@ async function sendChat() {
     reply.blocks.push({ type: 'error', text: e.message });
   }
   reply.pending = false;
+  reply.status = '';
   chat.busy = false;
-  if (chatDom?.chat === chat) chatDom.sendBtn.disabled = false;
+  if (chatDom?.chat === chat) setBusyUi(false);
   drawChat();
+}
+
+function setBusyUi(busy) {
+  chatDom.sendBtn.style.display = busy ? 'none' : '';
+  chatDom.stopBtn.style.display = busy ? '' : 'none';
+}
+
+async function stopChat(chat) {
+  chatDom?.stopBtn && (chatDom.stopBtn.disabled = true);
+  await api.call('ai:stop', chat.id).catch(() => {});
+  if (chat.reply) chat.reply.stopped = true;
+  if (chatDom?.stopBtn) chatDom.stopBtn.disabled = false;
 }
 
 let drawQueued = false;
@@ -1110,6 +1183,10 @@ api.onAiEvent((ev) => {
     if (state.page !== 'ai' || state.gameId !== chat.id.split('-')[0]) toast('The AI assistant is waiting for your approval.', 'info');
   } else if (ev.type === 'error') {
     reply.blocks.push({ type: 'error', text: ev.message });
+  } else if (ev.type === 'status') {
+    reply.status = ev.text;
+  } else if (ev.type === 'stopped') {
+    reply.stopped = true;
   } else if (ev.type === 'state-changed') {
     refreshGame();
   }
@@ -1347,55 +1424,52 @@ async function pageSettings() {
     renderPage();
   };
 
-  // Local model choice + reasoning switch.
-  const LOCAL_MODELS = [['qwen3-vl:8b', 'Qwen3-VL 8B · best quality (6 GB)'], ['qwen3-vl:4b', 'Qwen3-VL 4B · faster, lighter (3 GB)']];
-  const localOptions = (st) => {
-    const installed = new Set(st.models.map((m) => m.name));
-    const names = [...new Set([...LOCAL_MODELS.map(([v]) => v), ...installed])];
-    const sel = h('select', { class: 'input' }, ...names.map((v) => h('option', { value: v, selected: v === st.model },
-      `${LOCAL_MODELS.find(([m]) => m === v)?.[1] || v}${installed.has(v) ? '' : ' · not downloaded'}`)));
-    sel.addEventListener('change', async () => { await setS({ localModel: sel.value }); renderPage(); });
-    return h('div', { style: { marginTop: '12px' } }, h('label', { class: 'field' }, 'Local model', sel));
-  };
-
-  // Engine choice + local AI status.
+  // Engine choice + Shuriken AI (built-in local engine) status.
   const engine = aiProvider();
   const engineSeg = h('div', { class: 'seg', style: { marginBottom: '14px' } },
-    ...[['local', 'Shuriken Local AI · free'], ['claude', 'Claude · API key']].map(([k, l]) =>
+    ...[['local', 'Shuriken AI · free, on your PC'], ['claude', 'Claude · API key']].map(([k, l]) =>
       h('button', { class: engine === k ? 'on' : '', onClick: async () => { await setS({ aiProvider: k }); renderPage(); } }, l)));
-  const localBox = h('div', { class: 'muted small' }, 'Checking the local AI engine…');
+  const localBox = h('div', { class: 'muted small' }, 'Checking Shuriken AI…');
   const drawLocal = async () => {
     try {
-      const st = await api.call('localai:status');
-      const progress = h('div', { class: 'progress', style: { display: 'none', margin: '10px 0' } }, h('div', { style: { width: '0%' } }));
+      const st = await api.call('engine:status');
+      const progress = h('div', { class: 'progress', style: { display: 'none', margin: '10px 0 4px' } }, h('div', { style: { width: '0%' } }));
       const progressText = h('div', { class: 'faint small' });
-      const dl = h('button', { class: 'btn primary' }, `Download ${st.model}`);
-      dl.addEventListener('click', async () => {
-        dl.disabled = true;
+      const chosen = st.models.find((m) => m.id === st.model) || st.models[0];
+      const setupBtn = h('button', { class: 'btn primary' }, st.ready ? 'Re-check' : `Set up Shuriken AI (${chosen.sizeGB} GB, one time)`);
+      setupBtn.addEventListener('click', async () => {
+        setupBtn.disabled = true;
         progress.style.display = '';
-        const off = api.onLocalAiProgress((ev) => {
-          if (ev.total) progress.firstChild.style.width = `${Math.round((100 * (ev.completed || 0)) / ev.total)}%`;
-          progressText.textContent = ev.total ? `${ev.status} · ${fmtBytes(ev.completed || 0)} / ${fmtBytes(ev.total)}` : ev.status;
+        const off = api.onEngineProgress((ev) => {
+          if (ev.total) progress.firstChild.style.width = `${Math.round((100 * ev.done) / ev.total)}%`;
+          progressText.textContent = `${ev.label}: ${fmtBytes(ev.done)}${ev.total ? ` / ${fmtBytes(ev.total)}` : ''}`;
         });
         try {
-          await api.call('localai:pull', st.model);
-          toast('Local AI model ready', 'success');
+          await api.call('engine:setup', st.model);
+          toast('Shuriken AI is ready', 'success');
         } catch (e) {
-          toast(e.message, 'error', 9000);
+          toast(e.message, 'error', 10000);
         }
         off();
         drawLocal();
       });
+      const modelRows = st.models.map((m) => h('label', { class: 'fomod-opt', style: { margin: '0 0 6px' } },
+        h('input', { type: 'radio', name: 'localModel', checked: m.id === st.model, onChange: async () => { await setS({ localModel: m.id }); drawLocal(); } }),
+        h('span', { class: 'grow' }, m.label, h('span', { class: 'faint small' }, ` · ${m.sizeGB} GB`)),
+        m.id === st.recommendedModel ? h('span', { class: 'badge win' }, 'best for your GPU') : null,
+        m.installed ? h('span', { class: 'badge' }, 'downloaded') : null,
+        m.installed && m.id !== st.model ? h('button', { class: 'btn small ghost danger', onClick: async (e) => { e.preventDefault(); if (confirm(`Delete the ${m.label} files (${m.sizeGB} GB)?`)) { await api.call('engine:remove', m.id); drawLocal(); } } }, 'Delete') : null));
       localBox.replaceChildren(
         h('div', { class: 'row wrap', style: { marginBottom: '10px' } },
-          h('span', { class: `chip ${st.installed ? 'ok' : 'warn'}` }, st.installed ? 'Engine installed' : 'Engine (Ollama) not installed'),
-          st.installed ? h('span', { class: `chip ${st.running ? 'ok' : 'warn'}` }, st.running ? 'Running' : 'Not running') : null,
-          h('span', { class: `chip ${st.ready ? 'ok' : 'warn'}` }, st.ready ? `${st.model} ready` : `${st.model} not downloaded`),
-          ...st.capabilities.filter((c) => ['tools', 'vision', 'thinking'].includes(c)).map((c) => h('span', { class: 'chip' }, { tools: 'Uses tools', vision: 'Reads screenshots', thinking: 'Reasons' }[c]))),
-        !st.installed ? h('button', { class: 'btn', onClick: () => api.call('shell:open', 'https://ollama.com/download') }, 'Get Ollama (free)') : null,
-        st.installed && !st.ready ? [dl, progress, progressText] : null,
-        st.running ? localOptions(st) : null,
-        h('p', { class: 'faint small', style: { marginTop: '10px' } }, 'Runs entirely on your PC (your GPU). No account, no API key, nothing leaves your computer. It is smaller than Claude, so for very hard problems you can switch to Claude.'));
+          h('span', { class: `chip ${st.engineInstalled ? 'ok' : 'warn'}` }, st.engineInstalled ? `Engine ${st.build}` : 'Engine not installed'),
+          h('span', { class: `chip ${chosen.installed ? 'ok' : 'warn'}` }, chosen.installed ? 'Model ready' : 'Model not downloaded'),
+          h('span', { class: `chip ${st.running ? 'ok' : ''}` }, st.running ? 'Running' : 'Idle'),
+          h('span', { class: 'chip' }, `GPU: ${st.device}`)),
+        h('div', { style: { marginBottom: '10px' } }, modelRows),
+        h('div', { class: 'row wrap' }, st.ready ? null : setupBtn,
+          st.running ? h('button', { class: 'btn', onClick: async () => { await api.call('engine:stop'); toast('Shuriken AI stopped; GPU memory freed.', 'success'); drawLocal(); } }, 'Free GPU memory') : null),
+        progress, progressText,
+        h('p', { class: 'faint small', style: { marginTop: '10px' } }, "Runs entirely on your PC with Shuriken's built-in engine (llama.cpp + Qwen3-VL). No account, no API key, nothing leaves your computer. It unloads after 20 idle minutes so your games get the GPU back."));
     } catch (e) {
       localBox.textContent = e.message;
     }
@@ -1434,8 +1508,16 @@ async function pageSettings() {
       managedGames().map((g) => h('div', { class: 'issue info', style: { alignItems: 'center' } },
         h('div', { style: { width: '54px', height: '26px', borderRadius: '6px', backgroundSize: 'cover', flex: 'none', ...artStyle(g) } }),
         h('div', { class: 'txt' }, h('div', { class: 'name' }, g.name), h('div', { class: 'faint small mono' }, g.installDir || 'Not found')),
-        h('button', { class: 'btn small', onClick: async () => { await run(() => api.call('game:pickFolder', g.id), 'Folder updated'); await refreshGame(); const all = await api.call('app:init'); state.games = all.games; renderChrome(); renderPage(); } }, 'Change'))),
+        h('button', { class: 'btn small', onClick: async () => { if (await pickGameFolder(g)) renderPage(); } }, 'Change'))),
     ),
+    h('div', { class: 'card' },
+      h('h3', {}, 'Help & bug reports'),
+      h('p', { class: 'muted small' }, 'Found a problem? Copy a bug report (version, games, recent errors - no keys or passwords) and paste it into a GitHub issue.'),
+      h('div', { class: 'row wrap' },
+        h('button', { class: 'btn primary', onClick: async () => { const t = await run(() => api.call('app:bugReport')); await navigator.clipboard.writeText(t); toast('Bug report copied to the clipboard', 'success'); } }, 'Copy bug report'),
+        h('button', { class: 'btn', onClick: () => api.call('logs:open') }, 'Open logs folder'),
+        h('button', { class: 'btn ghost', onClick: () => api.call('shell:open', 'https://github.com/npscott202-stack/Shuriken-Mod-Manager/issues/new') }, 'Report on GitHub'),
+        h('button', { class: 'btn ghost', onClick: async () => { const u = await run(() => api.call('app:checkUpdate')); if (u) showUpdate(u); else toast('Shuriken is up to date', 'success'); } }, 'Check for updates'))),
     h('div', { class: 'card' },
       h('h3', {}, 'Launching'),
       h('div', { class: 'row', style: { marginBottom: '14px' } }, toggle(s.autoDeployOnLaunch, (v) => setS({ autoDeployOnLaunch: v })), h('div', {}, h('div', { class: 'name' }, 'Deploy before launching'), h('div', { class: 'muted small' }, 'Applies pending mod changes when you press Play or open a tool.'))),
@@ -1476,9 +1558,17 @@ $('#deployBtn').addEventListener('click', async () => {
 });
 
 $('#playBtn').addEventListener('click', async () => {
-  const r = await run(() => api.call('game:launch', state.gameId));
-  toast(`Launching ${r.launched}…`, 'success');
-  refreshGame();
+  const btn = $('#playBtn');
+  btn.disabled = true;
+  try {
+    const r = await api.call('game:launch', state.gameId);
+    toast(`Launching ${r.launched}…`, 'success');
+    refreshGame();
+  } catch (e) {
+    toast(e.message, 'error', 9000);
+  } finally {
+    setTimeout(() => { btn.disabled = false; }, 2500);
+  }
 });
 
 $('#profileSelect').addEventListener('change', async (e) => {
@@ -1543,10 +1633,23 @@ window.addEventListener('drop', async (e) => {
 });
 
 api.onToast(({ kind, text }) => toast(text, kind === 'error' ? 'error' : 'info', 8000));
+api.onDeployProgress((p) => {
+  const btn = $('#deployBtn');
+  if (btn.disabled && p.total) btn.textContent = `Deploying ${Math.round((100 * p.done) / p.total)}%`;
+});
 api.onDownload((d) => {
   state.downloads.set(d.id, d);
   if (d.status !== 'downloading') setTimeout(() => state.downloads.delete(d.id), 3000);
-  if (state.page === 'downloads') renderPage();
+  if (state.page === 'downloads') {
+    const row = document.querySelector(`[data-dl="${d.id}"]`);
+    if (row && d.status === 'downloading') {
+      row.querySelector('.progress > div').style.width = d.total ? `${(100 * d.received) / d.total}%` : '30%';
+      row.querySelector('.dl-size').textContent = d.total ? `${fmtBytes(d.received)} / ${fmtBytes(d.total)}` : fmtBytes(d.received);
+    } else {
+      clearTimeout(window.dlRenderTimer);
+      window.dlRenderTimer = setTimeout(renderPage, 300);
+    }
+  }
   renderSidebar();
 });
 api.onNxmInstalled(({ gameId, result }) => {
@@ -1557,6 +1660,36 @@ api.onScreenshot((shot) => {
   chatFor(state.gameId).attachments.push(shot);
   toast('Screenshot captured and attached to the AI chat.', 'success');
   if (state.page === 'ai') chatDom?.drawAttachments();
+});
+
+// ---------- updates, errors, keyboard ----------
+function showUpdate(u) {
+  const pill = h('button', { class: 'btn small primary', title: `Shuriken ${u.version} is available`, onClick: () => api.call('shell:open', u.url) }, `Update to ${u.version}`);
+  document.querySelector('#updateSlot')?.replaceChildren(pill);
+  toast(`Shuriken ${u.version} is available. Click "Update" in the top bar to download it.`, 'info', 9000);
+}
+
+window.addEventListener('error', (e) => api.call('log:error', 'window', e.error?.stack || e.message).catch(() => {}));
+window.addEventListener('unhandledrejection', (e) => api.call('log:error', 'promise', e.reason?.stack || String(e.reason)).catch(() => {}));
+
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    if (document.querySelector('.lightbox')) document.querySelector('.lightbox').remove();
+    else if (currentModal) closeModal();
+    return;
+  }
+  if (e.ctrlKey && !e.shiftKey && e.key.toLowerCase() === 'f' && state.page === 'mods') {
+    e.preventDefault();
+    document.querySelector('#modFilter')?.focus();
+  }
+  if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 'd') {
+    e.preventDefault();
+    document.querySelector('#deployBtn')?.click();
+  }
+  if (e.key === 'F5') {
+    e.preventDefault();
+    refreshGame().then(renderPage);
+  }
 });
 
 // ---------- boot ----------
@@ -1571,6 +1704,9 @@ api.onScreenshot((shot) => {
   const saved = localStorage.getItem('shuriken.game');
   const mine = managedGames();
   state.gameId = mine.find((g) => g.id === saved)?.id || mine.find((g) => g.installDir)?.id || mine[0]?.id || state.games[0].id;
+  const lastPage = localStorage.getItem('shuriken.page');
+  if (PAGES.some((p) => p.id === lastPage) && !(lastPage === 'plugins' && game().kind !== 'bethesda')) state.page = lastPage;
   renderChrome();
   renderPage();
+  setTimeout(() => api.call('app:checkUpdate').then((u) => u && showUpdate(u)).catch(() => {}), 4000);
 })();

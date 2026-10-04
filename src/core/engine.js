@@ -1,0 +1,328 @@
+// Shuriken Engine: a built-in local AI runtime (llama.cpp's llama-server, Vulkan build) that
+// Shuriken downloads, starts and stops itself. Works on NVIDIA, AMD and Intel GPUs, falls back
+// to the CPU, and speaks the OpenAI chat API (streaming, tool calls, images).
+const fs = require('fs');
+const os = require('os');
+const net = require('net');
+const path = require('path');
+const { spawn, execFile } = require('child_process');
+const store = require('./store');
+const archives = require('./archives');
+
+const MODELS = {
+  'qwen3-vl-8b': {
+    label: 'Qwen3-VL 8B Instruct · best quality',
+    sizeGB: 5.8,
+    minVramGB: 7,
+    files: [
+      { name: 'Qwen3VL-8B-Instruct-Q4_K_M.gguf', url: 'https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct-GGUF/resolve/main/Qwen3VL-8B-Instruct-Q4_K_M.gguf', role: 'model' },
+      { name: 'mmproj-Qwen3VL-8B-Instruct-Q8_0.gguf', url: 'https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct-GGUF/resolve/main/mmproj-Qwen3VL-8B-Instruct-Q8_0.gguf', role: 'mmproj' },
+    ],
+  },
+  'qwen3-vl-4b': {
+    label: 'Qwen3-VL 4B Instruct · faster, for 4–6 GB GPUs',
+    sizeGB: 3.0,
+    minVramGB: 4,
+    files: [
+      { name: 'Qwen3VL-4B-Instruct-Q4_K_M.gguf', url: 'https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct-GGUF/resolve/main/Qwen3VL-4B-Instruct-Q4_K_M.gguf', role: 'model' },
+      { name: 'mmproj-Qwen3VL-4B-Instruct-Q8_0.gguf', url: 'https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct-GGUF/resolve/main/mmproj-Qwen3VL-4B-Instruct-Q8_0.gguf', role: 'mmproj' },
+    ],
+  },
+};
+const DEFAULT_MODEL = 'qwen3-vl-8b';
+const CONTEXT = 12288;
+const UA = { 'User-Agent': 'Shuriken (desktop mod manager)' };
+
+const engineDir = () => store.dataDir('engine');
+const modelsDir = () => store.dataDir('models');
+
+// ---------- engine binaries ----------
+function installedBuild() {
+  const dir = engineDir();
+  const builds = fs.readdirSync(dir).filter((n) => /^b\d+$/.test(n) && fs.existsSync(path.join(dir, n, 'llama-server.exe')));
+  builds.sort((a, b) => Number(b.slice(1)) - Number(a.slice(1)));
+  return builds[0] ? { build: builds[0], exe: path.join(dir, builds[0], 'llama-server.exe') } : null;
+}
+
+async function downloadFile(url, dest, onProgress = () => {}, label = '') {
+  const part = `${dest}.part`;
+  const have = fs.existsSync(part) ? fs.statSync(part).size : 0;
+  const res = await fetch(url, { headers: { ...UA, ...(have ? { Range: `bytes=${have}-` } : {}) }, redirect: 'follow' });
+  if (!res.ok && res.status !== 206) throw new Error(`Download failed (${res.status}) for ${path.basename(dest)}`);
+  const resumed = res.status === 206;
+  const total = Number(res.headers.get('content-length') || 0) + (resumed ? have : 0);
+  const out = fs.createWriteStream(part, { flags: resumed ? 'a' : 'w' });
+  let done = resumed ? have : 0;
+  let last = 0;
+  for await (const chunk of res.body) {
+    if (!out.write(chunk)) await new Promise((r) => out.once('drain', r));
+    done += chunk.length;
+    if (Date.now() - last > 300) {
+      last = Date.now();
+      onProgress({ label, done, total });
+    }
+  }
+  await new Promise((resolve, reject) => out.end((e) => (e ? reject(e) : resolve())));
+  fs.renameSync(part, dest);
+  onProgress({ label, done, total });
+}
+
+// Downloads the newest llama.cpp Vulkan build (≈35 MB) if none is installed.
+async function installEngine(onProgress) {
+  const have = installedBuild();
+  if (have) return have;
+  const res = await fetch('https://api.github.com/repos/ggml-org/llama.cpp/releases/latest', { headers: UA });
+  if (!res.ok) throw new Error(`Could not reach GitHub (${res.status}) to download the AI engine.`);
+  const rel = await res.json();
+  const asset = rel.assets.find((a) => /bin-win-vulkan-x64\.zip$/.test(a.name));
+  if (!asset) throw new Error('No Windows build found in the latest llama.cpp release.');
+  const build = (asset.name.match(/llama-(b\d+)-/) || [])[1] || rel.tag_name;
+  const zip = path.join(engineDir(), asset.name);
+  await downloadFile(asset.browser_download_url, zip, onProgress, 'AI engine');
+  const target = path.join(engineDir(), build);
+  await archives.extract(zip, target);
+  fs.rmSync(zip, { force: true });
+  return installedBuild();
+}
+
+// ---------- models ----------
+function modelPaths(id) {
+  const m = MODELS[id];
+  if (!m) throw new Error(`Unknown model ${id}`);
+  const p = (role) => path.join(modelsDir(), m.files.find((f) => f.role === role).name);
+  return { model: p('model'), mmproj: p('mmproj') };
+}
+
+function modelInstalled(id) {
+  return MODELS[id].files.every((f) => fs.existsSync(path.join(modelsDir(), f.name)));
+}
+
+async function installModel(id, onProgress) {
+  for (const f of MODELS[id].files) {
+    const dest = path.join(modelsDir(), f.name);
+    if (!fs.existsSync(dest)) await downloadFile(f.url, dest, onProgress, f.role === 'model' ? 'AI model' : 'Screenshot reader');
+  }
+}
+
+function removeModel(id) {
+  if (server && server.modelId === id) stop();
+  for (const f of MODELS[id].files) fs.rmSync(path.join(modelsDir(), f.name), { force: true });
+}
+
+// ---------- GPU choice ----------
+let deviceCache = null;
+function listDevices(exe) {
+  if (deviceCache) return Promise.resolve(deviceCache);
+  return new Promise((resolve) => {
+    execFile(exe, ['--list-devices'], { windowsHide: true, timeout: 30000 }, (_e, stdout = '', stderr = '') => {
+      const devices = [];
+      for (const m of `${stdout}\n${stderr}`.matchAll(/^\s*(Vulkan\d+|CUDA\d+):\s*(.+?)\s*\((\d+) MiB,\s*(\d+) MiB free\)/gm)) {
+        devices.push({ id: m[1], name: m[2], totalMB: Number(m[3]), freeMB: Number(m[4]) });
+      }
+      deviceCache = devices;
+      resolve(devices);
+    });
+  });
+}
+
+// Dedicated GPUs beat integrated ones even when the integrated GPU reports more (shared) memory.
+function deviceScore(d) {
+  const n = d.name.toLowerCase();
+  if (/nvidia|geforce|rtx|quadro/.test(n)) return 3;
+  if (/radeon (rx|pro)|rx \d{3,4}/.test(n)) return 3;
+  if (/arc\(tm\) [ab]\d|arc [ab]\d/.test(n)) return 2;
+  return 1;
+}
+
+function pickDevice(devices) {
+  return [...devices].sort((a, b) => deviceScore(b) - deviceScore(a) || b.freeMB - a.freeMB)[0] || null;
+}
+
+// ---------- server lifecycle ----------
+let server = null; // { proc, port, modelId, ready: Promise, device, log }
+let idleTimer = null;
+
+function freePort() {
+  return new Promise((resolve, reject) => {
+    const s = net.createServer();
+    s.listen(0, '127.0.0.1', () => {
+      const { port } = s.address();
+      s.close(() => resolve(port));
+    });
+    s.on('error', reject);
+  });
+}
+
+async function waitHealthy(port, proc, timeoutMs = 240000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (proc.exitCode !== null) return false;
+    try {
+      const r = await fetch(`http://127.0.0.1:${port}/health`);
+      if (r.ok) return true;
+    } catch {
+      // still loading
+    }
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  return false;
+}
+
+function bumpIdle() {
+  clearTimeout(idleTimer);
+  // Free the GPU after 20 idle minutes so games get their VRAM back.
+  idleTimer = setTimeout(() => stop(), 20 * 60 * 1000);
+}
+
+// Serialized so a warm-up and a chat request can never launch two engines.
+let startLock = Promise.resolve();
+function start(modelId = DEFAULT_MODEL) {
+  const run = startLock.then(() => startUnlocked(modelId));
+  startLock = run.catch(() => {});
+  return run;
+}
+
+async function startUnlocked(modelId) {
+  if (server && server.modelId === modelId && server.proc.exitCode === null) {
+    await server.ready;
+    bumpIdle();
+    return server;
+  }
+  stop();
+  const eng = installedBuild();
+  if (!eng) throw new Error('The AI engine is not installed yet. Open Settings → AI assistant and click "Set up Shuriken AI".');
+  if (!modelInstalled(modelId)) throw new Error('The AI model is not downloaded yet. Open Settings → AI assistant and click "Set up Shuriken AI".');
+  const { model, mmproj } = modelPaths(modelId);
+  const device = pickDevice(await listDevices(eng.exe));
+  const port = await freePort();
+  const args = ['-m', model, '--mmproj', mmproj, '--host', '127.0.0.1', '--port', String(port), '-c', String(CONTEXT),
+    '--jinja', '-fa', 'auto', '-ctk', 'q8_0', '-ctv', 'q8_0', '--no-webui', '-np', '1', '--fit', 'on'];
+  if (device) args.push('--device', device.id);
+  const logFile = path.join(store.dataDir('logs'), 'engine.log');
+  const log = fs.createWriteStream(logFile, { flags: 'w' });
+  const proc = spawn(eng.exe, args, { cwd: path.dirname(eng.exe), windowsHide: true });
+  proc.stdout.pipe(log);
+  proc.stderr.pipe(log);
+  server = { proc, port, modelId, device, logFile };
+  server.ready = waitHealthy(port, proc).then((ok) => {
+    if (!ok) {
+      const tail = fs.existsSync(logFile) ? fs.readFileSync(logFile, 'utf8').split(/\r?\n/).slice(-12).join('\n') : '';
+      stop();
+      throw new Error(`The AI engine failed to start. Last log lines:\n${tail}`);
+    }
+    return server;
+  });
+  proc.on('exit', () => {
+    if (server?.proc === proc) server = null;
+  });
+  await server.ready;
+  bumpIdle();
+  return server;
+}
+
+function stop() {
+  clearTimeout(idleTimer);
+  if (server?.proc && server.proc.exitCode === null) server.proc.kill();
+  server = null;
+}
+
+async function status(modelId = DEFAULT_MODEL) {
+  const eng = installedBuild();
+  const devices = eng ? await listDevices(eng.exe).catch(() => []) : [];
+  const device = pickDevice(devices);
+  return {
+    engineInstalled: !!eng,
+    build: eng?.build || null,
+    model: modelId,
+    models: Object.entries(MODELS).map(([id, m]) => ({ id, label: m.label, sizeGB: m.sizeGB, installed: modelInstalled(id), recommended: device ? device.totalMB / 1024 >= m.minVramGB : id === 'qwen3-vl-4b' })),
+    ready: !!eng && modelInstalled(modelId),
+    running: !!server && server.proc.exitCode === null,
+    device: device ? `${device.name} (${Math.round(device.totalMB / 1024)} GB)` : 'CPU (no supported GPU found)',
+    recommendedModel: device && device.totalMB / 1024 >= MODELS['qwen3-vl-8b'].minVramGB ? 'qwen3-vl-8b' : 'qwen3-vl-4b',
+  };
+}
+
+// Loads the model and runs a tiny request so the GPU kernels are compiled before the user asks
+// anything. Safe to call repeatedly; does nothing if the engine isn't set up.
+let warming = null;
+async function warm(modelId = DEFAULT_MODEL) {
+  if (!installedBuild() || !modelInstalled(modelId)) return { warmed: false };
+  if (server && server.modelId === modelId && server.warm) return { warmed: true };
+  if (warming) return warming;
+  warming = (async () => {
+    try {
+      const s = await start(modelId);
+      await fetch(`http://127.0.0.1:${s.port}/v1/chat/completions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messages: [{ role: 'system', content: 'You are a helpful assistant.'.repeat(60) }, { role: 'user', content: 'Say OK.' }], max_tokens: 1 }),
+      });
+      if (server) server.warm = true;
+      return { warmed: true };
+    } finally {
+      warming = null;
+    }
+  })();
+  return warming;
+}
+
+// One-click setup: engine + model.
+async function setup(modelId, onProgress) {
+  await installEngine(onProgress);
+  await installModel(modelId, onProgress);
+  return status(modelId);
+}
+
+// ---------- chat (OpenAI-compatible streaming) ----------
+// Streams one assistant turn. onEvent receives { type: 'text' | 'thinking', delta }. Returns
+// { content, tool_calls } where tool_calls are OpenAI-style.
+async function chatTurn({ modelId, messages, tools, signal }, onEvent) {
+  const s = await start(modelId);
+  const res = await fetch(`http://127.0.0.1:${s.port}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ messages, tools, stream: true, temperature: 0.5, top_p: 0.9, max_tokens: 4096 }),
+    signal,
+  });
+  if (!res.ok) throw new Error(`AI engine error ${res.status}: ${(await res.text()).slice(0, 300)}`);
+  const msg = { role: 'assistant', content: '', tool_calls: [] };
+  let buf = '';
+  const decoder = new TextDecoder();
+  for await (const chunk of res.body) {
+    buf += decoder.decode(chunk, { stream: true });
+    let nl;
+    while ((nl = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, nl).trim();
+      buf = buf.slice(nl + 1);
+      if (!line.startsWith('data:')) continue;
+      const data = line.slice(5).trim();
+      if (data === '[DONE]') continue;
+      let ev;
+      try {
+        ev = JSON.parse(data);
+      } catch {
+        continue;
+      }
+      if (ev.error) throw new Error(ev.error.message || String(ev.error));
+      const d = ev.choices?.[0]?.delta || {};
+      if (d.reasoning_content) onEvent({ type: 'thinking', delta: d.reasoning_content });
+      if (d.content) {
+        msg.content += d.content;
+        onEvent({ type: 'text', delta: d.content });
+      }
+      for (const tc of d.tool_calls || []) {
+        const i = tc.index ?? msg.tool_calls.length;
+        const cur = (msg.tool_calls[i] = msg.tool_calls[i] || { id: tc.id || `call_${Date.now()}_${i}`, type: 'function', function: { name: '', arguments: '' } });
+        if (tc.id) cur.id = tc.id;
+        if (tc.function?.name) cur.function.name += tc.function.name;
+        if (tc.function?.arguments) cur.function.arguments += tc.function.arguments;
+      }
+    }
+  }
+  msg.tool_calls = msg.tool_calls.filter(Boolean);
+  if (!msg.tool_calls.length) delete msg.tool_calls;
+  bumpIdle();
+  return msg;
+}
+
+module.exports = { MODELS, DEFAULT_MODEL, status, setup, warm, installEngine, installModel, removeModel, start, stop, chatTurn, listDevices, pickDevice };
