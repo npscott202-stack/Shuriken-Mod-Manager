@@ -292,3 +292,20 @@ label.field { display: flex; flex-direction: column; gap: 6px; font-size: 11px; 
 .msg.assistant:hover .msg-actions { opacity: 1; }
 .btn.danger { color: #fff; background: linear-gradient(180deg, #ff4b5e, #c51d33); border-color: #ff5a6c; }
 .btn.ghost.danger, .btn.small.danger { background: transparent; color: var(--err); border-color: transparent; }
+
+/* Saves */
+.saves-layout { display: grid; grid-template-columns: minmax(280px, 380px) 1fr; gap: 14px; align-items: start; }
+@media (max-width: 900px) { .saves-layout { grid-template-columns: 1fr; } }
+.save-list { max-height: calc(100vh - 330px); overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
+.save-item { display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 9px; cursor: pointer; border: 1px solid transparent; }
+.save-item:hover { background: var(--panel-2); }
+.save-item.active { background: var(--accent-soft); border-color: rgba(255, 59, 79, 0.35); }
+.save-detail { position: sticky; top: 0; }
+.save-shot { width: 100%; aspect-ratio: 5 / 3; object-fit: cover; border-radius: 10px; background: linear-gradient(135deg, #15151d, #0b0b10); display: block; opacity: 0.35; transition: opacity 0.2s; }
+.save-shot.loaded { opacity: 1; }
+.save-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 12px 0; }
+.ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ring-spin { width: 18px; height: 18px; border-radius: 50%; border: 2px solid var(--line-2); border-top-color: var(--accent); animation: spin 0.8s linear infinite; flex: none; }
+
+/* Playtest */
+.game-shot { display: block; max-width: min(560px, 100%); border-radius: 10px; border: 1px solid var(--line-2); margin: 8px 0; cursor: zoom-in; }

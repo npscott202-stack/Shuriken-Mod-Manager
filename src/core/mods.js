@@ -59,9 +59,7 @@ function save(gameId) {
 
 function createInstance(gameId, name, copyFrom) {
   const inst = instances(gameId);
-  name = String(name || '').trim();
-  if (!name) throw new Error('Name the instance first.');
-  if (inst.list.some((x) => x.toLowerCase() === name.toLowerCase())) throw new Error('An instance with that name already exists.');
+  name = checkName(name, inst.list, 'instance');
   const cur = state(gameId);
   const fresh = defaults(gameId);
   // A new instance points at the same game folder and tools, but has its own mods and profiles.
@@ -208,10 +206,8 @@ function setProfileOptions(gameId, name, opts) {
 
 function renameProfile(gameId, from, to) {
   const s = state(gameId);
-  to = String(to || '').trim();
-  if (!to) throw new Error('Name the profile first.');
   if (!s.profiles[from]) throw new Error('No such profile');
-  if (s.profiles[to]) throw new Error('A profile with that name already exists.');
+  to = checkName(to, Object.keys(s.profiles).filter((n) => n !== from), 'profile');
   const oldDir = path.join(stagingDir(gameId), '_profiles', safeFolder(from));
   s.profiles[to] = s.profiles[from];
   delete s.profiles[from];
@@ -690,9 +686,17 @@ function profiles(gameId) {
   return { active: s.activeProfile, names: Object.keys(s.profiles) };
 }
 
+function checkName(name, taken, what) {
+  name = String(name || '').trim();
+  if (!name) throw new Error(`Name the ${what} first.`);
+  if (/[<>:"/\\|?*\u0000-\u001f]/.test(name)) throw new Error(`${what[0].toUpperCase()}${what.slice(1)} names cannot contain < > : " / \\ | ? *`);
+  if (taken.some((t) => t.toLowerCase() === name.toLowerCase())) throw new Error(`A ${what} named "${name}" already exists.`);
+  return name;
+}
+
 function createProfile(gameId, name, copyFrom) {
   const s = state(gameId);
-  if (s.profiles[name]) throw new Error('Profile already exists');
+  name = checkName(name, Object.keys(s.profiles), 'profile');
   s.profiles[name] = copyFrom && s.profiles[copyFrom] ? structuredClone(s.profiles[copyFrom]) : { order: Object.keys(s.mods), enabled: {}, plugins: null };
   save(gameId);
 }

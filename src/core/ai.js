@@ -18,11 +18,16 @@ const workshop = require('./workshop');
 const library = require('./library');
 const engine = require('./engine');
 const thunderstore = require('./sources/thunderstore');
+const saves = require('./saves');
+const precombines = require('./precombines');
+const playtest = require('./playtest');
+const toolstore = require('./toolstore');
 
 // Does a tool apply to this game? games: undefined (all), a kind, a game id, or 'thunderstore'.
 function toolFits(t, g) {
   if (!t.games) return true;
   if (t.games === 'thunderstore') return !!g.thunderstore;
+  if (t.games === 'fo4') return g.id === 'fallout4' || g.id === 'fallout4vr';
   return t.games === g.kind || t.games === g.id;
 }
 
@@ -45,6 +50,10 @@ How to work:
   - BSArch / BSArchPro / Archive2: pack_archive, unpack_archive (to inspect or extract assets), list_archive.
   - LOOT: sort_plugins with method "loot", and loot_info to read LOOT's masterlist notes for a plugin (dirty edits to clean, requirements, incompatibilities).
   - BodySlide: bodyslide_info, bodyslide_build (outputs into a "BodySlide Output" mod).
+  - Playtest mode: when the user describes an in-game problem ("the bridge in Sanctuary flickers", "this NPC has a black face"), you can go and look: playtest_start (load their save or coc to the place; playtest_find_location finds cell IDs), then playtest_screenshot / playtest_act to move and look around / playtest_inspect to identify the object and its plugin / playtest_console for console commands. Describe what you see in each screenshot, connect it to mods and plugins with your other tools, fix it (with approval), then re-check in game. The user can keep typing while you play; follow their new instructions. If screenshots come back black, use playtest_setup_window. Close the game with playtest_stop when done unless the user wants to keep playing.
+  - Missing tools: list_installable_tools / install_tool download free tools from their official releases; request_tool asks the user for anything else (Creation Kit, Nexus-only tools).
+  - Saves: list_saves, analyze_save (ReSaver engine: script bloat, orphaned/undefined scripts from removed mods, truncation), clean_save (backs up first), cleanup_save_folder. For "my save won't load / crashes on load / mod removed mid-playthrough", check the save before suggesting anything else.
+  - Precombines/previs (Fallout 4): analyze_precombines finds mods breaking precombined meshes or previs (FPS drops, flickering, invisible walls); fix_precombine_order applies safe load-order fixes. Recommend PRP (Previsibines Repair Pack) or the mod's own PRP/previs patch for the rest, and generate_previs to build a patch with the Creation Kit when none exists.
   - CM Toolkit (Collective Modding Toolkit) checks for Fallout 4: fo4_archive_check (Old-Gen/Next-Gen BA2 versions, BA2 limits) and patch_ba2_versions (its archive patcher).
   - NifSkope-style checks: check_nif_textures finds textures/materials a mesh references that are missing (purple or invisible objects); check_assets checks any asset paths.
   - WorldPainter (Minecraft): call worldpainter_info first (map format IDs differ between WorldPainter versions), generate_heightmap for the terrain, then run_worldpainter_script with a script like: var hm = wp.getHeightMap().fromFile(argv[1]).go(); var fmt = wp.getMapFormat().withId('<id from worldpainter_info>').go(); var world = wp.createWorld().fromHeightMap(hm).fromLevels(0,255).toLevels(lo,hi).withWaterLevel(62).withMapFormat(fmt).withLowerBuildLimit(-64).withUpperBuildLimit(320).go(); world.setName('Name'); wp.applyTerrain(index).toWorld(world).withFilter(wp.createFilter().belowLevel(66).go()).applyToSurface().go(); wp.exportWorld(world).toDirectory(argv[2]).go(); — every operation ends with .go(). Pass the heightmap path and the Minecraft saves folder as args.
@@ -119,6 +128,28 @@ TOOL_DEFS.push(
   { name: 'generate_previs', write: true, games: 'fallout4', description: 'Fallout 4: runs Creation Kit precombine + previs generation for a plugin (GeneratePrecombined, CompressPSG, BuildCDX, GeneratePreVisData). Takes a long time.', input_schema: obj({ plugin: S }) },
   { name: 'fo4_archive_check', write: false, games: 'fallout4', description: 'Fallout 4: game edition (Old-Gen/Next-Gen), BA2 counts vs limits, archives in the wrong BA2 version (CM Toolkit checks).', input_schema: obj({}) },
   { name: 'patch_ba2_versions', write: true, games: 'fallout4', description: 'Fallout 4: rewrites BA2 header versions (1 = works on Old-Gen and Next-Gen, 8 = Next-Gen). Logged for undo.', input_schema: obj({ to_version: { type: 'integer', enum: [1, 8] }, files: { type: 'array', items: S } }, ['to_version']) },
+
+  { name: 'list_saves', write: false, games: 'bethesda', description: 'Lists save games (newest first) with character, level, location, date, missing plugins and file problems (corrupt header, truncated, leftover .tmp, orphan co-saves).', input_schema: obj({ limit: { type: 'integer' } }, []) },
+  { name: 'analyze_save', write: false, games: 'bethesda', description: 'Deep check of one save (Skyrim / Fallout 4) with the ReSaver engine: truncation, plugin overflow, unattached script instances, undefined scripts and stuck threads from removed mods, script load, scripts with the most instances.', input_schema: obj({ file: S }) },
+  { name: 'clean_save', write: true, games: 'bethesda', description: 'Backs up a save and cleans it with the ReSaver engine (removes unattached instances and undefined script elements/threads; optional: nonexistent created forms, formlists, havok reset). Only for saves analyze_save reported problems in.', input_schema: obj({ file: S, ops: { type: 'array', items: { type: 'string', enum: ['unattached', 'undefined', 'nonexistent', 'formlists', 'havok'] } } }, ['file']) },
+  { name: 'cleanup_save_folder', write: true, games: 'bethesda', description: 'Moves leftover .tmp saves, empty saves and co-saves without a save to the Recycle Bin.', input_schema: obj({}) },
+  { name: 'analyze_precombines', write: false, games: 'fo4', description: 'Fallout 4: scans the whole active load order for broken precombines/previs: mods that edit precombined references (cell precombines turned off = FPS loss, flicker), cells whose precombine data a mod removed, previs patches overridden by older data, whether PRP is installed, and safe load-order fixes.', input_schema: obj({}) },
+  { name: 'fix_precombine_order', write: true, games: 'fo4', description: 'Fallout 4: applies the load-order suggestions from analyze_precombines (moves previs patches below the plugins that override them).', input_schema: obj({}) },
+
+  // ---- playtest (the AI plays the game) ----
+  { name: 'playtest_start', write: true, description: 'Playtest mode: launches the game with the current mods (or attaches if it is already running), optionally loads a save (Bethesda: save file name) or travels to a location (Bethesda: cell editor ID for coc, see playtest_find_location), and returns a screenshot. Use it when the user wants you to go look at a problem in game.', input_schema: obj({ save: { type: 'string', description: 'Save file name, e.g. from list_saves (Bethesda)' }, location: { type: 'string', description: 'Cell editor ID to coc to (Bethesda)' }, wait_seconds: { type: 'integer', description: 'Seconds to wait for the main menu after launch (default 45)' } }, []) },
+  { name: 'playtest_screenshot', write: false, description: 'Playtest: captures the game window so you can see what is on screen right now.', input_schema: obj({}, []) },
+  { name: 'playtest_console', write: false, games: 'bethesda', description: 'Playtest (Bethesda): runs console commands in the running game and returns the console output. Examples: coc <cell>, cow <world> x y, tgm, tcl, tfc, player.moveto <ref id>, prid <ref id> then disable/enable/getpos x, help <word> 4 (search forms by name), player.additem <id> <n>, setstage, sqv <quest>, getav, save <name>, load <name>. Never use commands that wreck the user\'s save permanently without saying so; prefer testing on a new save made with "save ShurikenTest".', input_schema: obj({ commands: { type: 'array', items: S } }) },
+  { name: 'playtest_act', write: false, description: 'Playtest: presses/holds keys, moves the mouse to look around, clicks, and returns a screenshot afterwards. actions is a list of {key, ms?} (ms = hold, e.g. {"key":"w","ms":2000} walks forward), {look:[dx,dy]} (mouse pixels, ~700 = quarter turn), {click:"left"|"right"}, {wait:ms}, {text:"..."}.', input_schema: obj({ actions: { type: 'array', items: { type: 'object' } } }) },
+  { name: 'playtest_inspect', write: false, games: 'bethesda', description: 'Playtest (Bethesda): opens the console and selects the object under the crosshair (look at it first), optionally runs commands on it (e.g. "getpos x", "disable", "getbaseobject"), returns a screenshot (the console shows the reference ID and, with Better Console / More Informative Console, its plugin) and the console output.', input_schema: obj({ commands: { type: 'array', items: S } }, []) },
+  { name: 'playtest_find_location', write: false, games: 'bethesda', description: 'Finds cells by editor ID text in the active load order (for coc), e.g. "Sanctuary", "Diamond", "Whiterun".', input_schema: obj({ query: S }) },
+  { name: 'playtest_setup_window', write: true, games: 'bethesda', description: 'Switches the game to borderless windowed (Prefs INI) so screenshots and input work; needed when playtest screenshots come back black.', input_schema: obj({}, []) },
+  { name: 'playtest_status', write: false, description: 'Playtest: whether the game is running and what has been done this session.', input_schema: obj({}, []) },
+  { name: 'playtest_stop', write: true, description: 'Playtest: closes the game (Bethesda: console qqq; unsaved progress is lost).', input_schema: obj({}, []) },
+  // ---- getting tools ----
+  { name: 'list_installable_tools', write: false, description: 'Lists free modding tools Shuriken can download and register automatically (xEdit, LOOT, Wrye Bash, NifSkope, texconv, Blockbench, AssetRipper, UABEA, FModel, dnSpyEx) and which fit this game.', input_schema: obj({}, []) },
+  { name: 'install_tool', write: true, description: 'Downloads a tool from list_installable_tools (official GitHub release) and registers it for this game.', input_schema: obj({ id: S }) },
+  { name: 'request_tool', write: false, description: 'Asks the user to add a tool Shuriken cannot download itself (e.g. Creation Kit from Steam, Nexus-only tools, paid tools). Shows a card in the chat with a link and an "Add tool" button. Say what the tool is for.', input_schema: obj({ name: S, reason: S, url: { type: 'string' } }, ['name', 'reason']) },
 
   // ---- Minecraft ----
   { name: 'list_worlds', write: false, games: 'minecraft', description: 'Lists Minecraft worlds in saves with name, version, game mode and installed/enabled datapacks.', input_schema: obj({}) },
@@ -402,6 +433,49 @@ async function runTool(gameId, name, input, ctx) {
     }
     case 'generate_previs':
       return beth.generatePrevis(gameId, path.basename(input.plugin));
+    case 'playtest_start':
+      return playtest.start(gameId, { save: input.save, location: input.location, waitSeconds: input.wait_seconds || 45 });
+    case 'playtest_screenshot':
+      return playtest.screenshot(gameId);
+    case 'playtest_console':
+      return { output: await playtest.consoleRun(gameId, input.commands || []) };
+    case 'playtest_act':
+      return playtest.act(gameId, input.actions || []);
+    case 'playtest_inspect':
+      return playtest.inspect(gameId, input.commands || []);
+    case 'playtest_find_location':
+      return playtest.findLocation(gameId, input.query);
+    case 'playtest_setup_window':
+      return playtest.setupWindow(gameId);
+    case 'playtest_status':
+      return playtest.status(gameId);
+    case 'playtest_stop':
+      return playtest.stop(gameId);
+    case 'list_installable_tools':
+      return toolstore.list(gameId);
+    case 'install_tool':
+      return toolstore.install(gameId, input.id);
+    case 'request_tool':
+      ctx.emit?.({ type: 'toolreq', name: input.name, reason: input.reason, url: input.url || null });
+      return 'Shown to the user with a link and an "Add tool" button. Continue with what you can do meanwhile, or wait for them to add it.';
+    case 'list_saves': {
+      const r = saves.list(gameId);
+      return { dir: r.dir, total: r.saves.length, junk: r.junk, saves: r.saves.slice(0, input.limit || 25).map(({ file, name, level, location, savedAt, size, issues, missing }) => ({ file, name, level, location, savedAt, size, issues: issues.map((i) => i.text), missing: missing?.slice(0, 20) })) };
+    }
+    case 'analyze_save':
+      return saves.analyze(gameId, input.file);
+    case 'clean_save':
+      return saves.clean(gameId, input.file, input.ops?.length ? input.ops : saves.CLEAN_OPS);
+    case 'cleanup_save_folder':
+      return saves.cleanupJunk(gameId);
+    case 'analyze_precombines': {
+      const r = await precombines.analyze(gameId);
+      return { ...r, cells: r.cells.slice(0, 60) };
+    }
+    case 'fix_precombine_order': {
+      const r = await precombines.analyze(gameId);
+      return precombines.applySuggestions(gameId, r.suggestions);
+    }
     case 'fo4_archive_check':
       return beth.fo4ArchiveCheck(gameId);
     case 'patch_ba2_versions':
@@ -453,6 +527,13 @@ function describeAction(name, input) {
     case 'prepare_papyrus_sources': return 'Extract the base game Papyrus script sources';
     case 'bodyslide_build': return `BodySlide batch build ${input.groups.join(', ')} with preset "${input.preset}"`;
     case 'generate_previs': return `Generate precombines + previs for ${input.plugin} with the Creation Kit (long-running)`;
+    case 'clean_save': return `Back up and clean the save ${input.file} (${(input.ops?.length ? input.ops : saves.CLEAN_OPS).join(', ')})`;
+    case 'cleanup_save_folder': return 'Move leftover/empty save files to the Recycle Bin';
+    case 'fix_precombine_order': return 'Reorder plugins so previs patches load after the mods that override them';
+    case 'playtest_start': return `Launch the game for a playtest${input.save ? ` and load ${input.save}` : input.location ? ` and travel to ${input.location}` : ''} (the AI will press keys in the game window)`;
+    case 'playtest_setup_window': return 'Switch the game to borderless windowed (Prefs INI)';
+    case 'playtest_stop': return 'Close the game';
+    case 'install_tool': return `Download and register ${input.id} from its official GitHub release`;
     case 'patch_ba2_versions': return `Patch ${input.files?.length ? input.files.join(', ') : 'all BA2 archives'} to BA2 version ${input.to_version}`;
     case 'run_worldpainter_script': return 'Run a WorldPainter script (creates/exports a world)';
     default: return name;
@@ -505,12 +586,18 @@ async function executeTool({ gameId, name, input: rawInput, id, cfg, emit, appro
   }
   emit({ type: 'tool', id, name, status: 'running', label });
   try {
-    const out = await runTool(gameId, name, input, ctx);
+    let out = await runTool(gameId, name, input, ctx);
+    let image = null;
+    if (out && typeof out === 'object' && out.image?.data) {
+      ({ image } = out);
+      out = { ...out, image: undefined };
+      emit({ type: 'shot', dataUrl: `data:${image.mediaType};base64,${image.data}` });
+    }
     let textOut = typeof out === 'string' ? out : JSON.stringify(out, null, 1);
     if (textOut.length > maxChars) textOut = `${textOut.slice(0, maxChars)}\n...[truncated]`;
     emit({ type: 'tool', id, name, status: 'done', label });
     if (WRITE_TOOLS.has(name)) emit({ type: 'state-changed' });
-    return { isError: false, content: textOut };
+    return { isError: false, content: textOut, image };
   } catch (e) {
     emit({ type: 'tool', id, name, status: 'error', label: `${label}: ${e.message}` });
     return { isError: true, content: e.message };
@@ -536,7 +623,7 @@ async function send({ chatId, gameId, text, images = [] }, emit, approve) {
 
   const anthropic = client();
   const cfg = settings();
-  const ctx = { onChange: () => emit({ type: 'state-changed' }) };
+  const ctx = { onChange: () => emit({ type: 'state-changed' }), emit };
 
   for (let turn = 0; turn < 40; turn++) {
     const stream = anthropic.beta.messages.stream({
@@ -583,9 +670,16 @@ async function send({ chatId, gameId, text, images = [] }, emit, approve) {
         continue;
       }
       const r = await executeTool({ gameId, name: tu.name, input: tu.input, id: tu.id, cfg, emit, approve, ctx });
-      results.push({ type: 'tool_result', tool_use_id: tu.id, content: r.content, ...(r.isError ? { is_error: true } : {}) });
+      const content = r.image ? [{ type: 'text', text: r.content }, { type: 'image', source: { type: 'base64', media_type: r.image.mediaType, data: r.image.data } }] : r.content;
+      results.push({ type: 'tool_result', tool_use_id: tu.id, content, ...(r.isError ? { is_error: true } : {}) });
+    }
+    // Messages the user typed while the assistant was working (e.g. during a playtest).
+    for (const m of takeSteer(chat)) {
+      results.push({ type: 'text', text: `The user adds while you work: ${m.text}` });
+      for (const img of m.images) results.push({ type: 'image', source: { type: 'base64', media_type: img.mediaType, data: img.data } });
     }
     chat.messages.push({ role: 'user', content: results });
+    pruneImages(chat.messages);
     if (chat.abort.signal.aborted) break;
     emit({ type: 'turn' });
   }
@@ -603,6 +697,7 @@ Rules:
 - When you change something (enable/disable mods, plugin order, INI values, files, deploy) use the matching tool; the user approves each change. Make the smallest fix first, then tell the user to test.
 - To build a mod: workshop_create, workshop_write_file for every file (complete files), then compile/build/package, then deploy.
 - If a screenshot is attached, read the text in it and use it as evidence.
+- Playtest: to look at an in-game problem yourself, playtest_start (with the save or a cell ID), then playtest_screenshot / playtest_act / playtest_inspect / playtest_console. Say what you see, fix it with your tools, check again, playtest_stop at the end.
 - Answer in plain language for a non-expert. Short summary first, then numbered steps.`;
 
 // A smaller toolset with one-line descriptions, sized for an 8K-token local context.
@@ -611,7 +706,9 @@ const LOCAL_TOOLSET = new Set([
   'minecraft_scan', 'search_modrinth', 'install_modrinth', 'set_mod_enabled', 'set_mod_priority', 'set_plugin_enabled', 'move_plugin',
   'sort_plugins', 'set_ini_value', 'write_text_file', 'deploy', 'list_tools', 'launch_tool', 'run_xedit_clean', 'loot_info',
   'check_nif_textures', 'workshop_create', 'workshop_write_file', 'workshop_list_files', 'workshop_package', 'list_worlds',
-  'search_thunderstore', 'install_thunderstore',
+  'search_thunderstore', 'install_thunderstore', 'list_saves', 'analyze_save', 'clean_save', 'analyze_precombines',
+  'playtest_start', 'playtest_screenshot', 'playtest_console', 'playtest_act', 'playtest_inspect', 'playtest_find_location', 'playtest_stop',
+  'request_tool', 'install_tool',
 ]);
 
 function slimSchema(schema) {
@@ -672,14 +769,15 @@ async function sendLocal({ chat, gameId, text, images }, emit, approve, cfg) {
   chat.local.push({ role: 'user', content: images.length ? parts : parts[0].text });
   const g = mods.game(gameId);
   const tools = localTools(g);
-  const ctx = { onChange: () => emit({ type: 'state-changed' }) };
+  const ctx = { onChange: () => emit({ type: 'state-changed' }), emit };
 
-  for (let turn = 0; turn < 25; turn++) {
+  for (let turn = 0; turn < 40; turn++) {
     if (chat.abort?.signal.aborted) break;
     trimLocalHistory(chat.local);
     const msg = await engine.chatTurn({ modelId, messages: chat.local, tools, signal: chat.abort?.signal }, emit);
     chat.local.push({ role: 'assistant', content: msg.content || '', ...(msg.tool_calls ? { tool_calls: msg.tool_calls } : {}) });
     if (!msg.tool_calls?.length) break;
+    const shots = [];
     for (const call of msg.tool_calls) {
       if (chat.abort?.signal.aborted) {
         chat.local.push({ role: 'tool', tool_call_id: call.id, content: 'Stopped by the user.' });
@@ -688,10 +786,53 @@ async function sendLocal({ chat, gameId, text, images }, emit, approve, cfg) {
       const name = call.function?.name;
       const r = await executeTool({ gameId, name, input: call.function?.arguments, id: call.id, cfg, emit, approve, ctx, maxChars: 6000 });
       chat.local.push({ role: 'tool', tool_call_id: call.id, content: r.isError ? `ERROR: ${r.content}` : r.content });
+      if (r.image) shots.push(r.image);
+    }
+    // The local model sees images only in user messages: keep just the newest game screenshot.
+    if (shots.length) {
+      for (const m of chat.local) if (Array.isArray(m.content) && m.content[0]?.text?.startsWith('[Game screenshot')) m.content = '[older game screenshot removed]';
+      chat.local.push({ role: 'user', content: [{ type: 'text', text: '[Game screenshot from the tool above]' }, { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${shrinkForLocal(shots[shots.length - 1].data)}` } }] });
+    }
+    for (const m of takeSteer(chat)) {
+      const parts = [{ type: 'text', text: `The user adds while you work: ${m.text}` }];
+      for (const img of m.images) parts.push({ type: 'image_url', image_url: { url: `data:image/jpeg;base64,${shrinkForLocal(img.data)}` } });
+      chat.local.push({ role: 'user', content: m.images.length ? parts : parts[0].text });
     }
     emit({ type: 'turn' });
   }
   emit({ type: 'done' });
+}
+
+
+// ---------- messages typed while the assistant works ----------
+function steer(chatId, text, images = []) {
+  const chat = chats.get(chatId);
+  if (!chat) return false;
+  (chat.steer ||= []).push({ text, images });
+  return true;
+}
+
+function takeSteer(chat) {
+  const list = chat.steer || [];
+  chat.steer = [];
+  return list;
+}
+
+// Long playtests produce many screenshots; keep only the newest few in the conversation.
+function pruneImages(messages, keep = 6) {
+  let seen = 0;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m.role !== 'user' || !Array.isArray(m.content)) continue;
+    for (const block of m.content) {
+      const list = block.type === 'tool_result' && Array.isArray(block.content) ? block.content : [block];
+      for (let j = 0; j < list.length; j++) {
+        if (list[j].type !== 'image') continue;
+        if (++seen > keep) list[j] = { type: 'text', text: '[older screenshot removed]' };
+      }
+      if (block.type === 'image' && seen > keep) Object.assign(block, { type: 'text', text: '[older screenshot removed]', source: undefined });
+    }
+  }
 }
 
 function friendlyError(e) {
@@ -713,4 +854,4 @@ function reset(chatId) {
   chats.delete(chatId);
 }
 
-module.exports = { send, stop, reset, friendlyError, TOOL_DEFS, provider };
+module.exports = { send, stop, reset, steer, friendlyError, TOOL_DEFS, provider };

@@ -350,4 +350,4 @@ async function gradleBuild(dir) {
   return { ok: r.code === 0 && jars.length > 0, exitCode: r.code, jdk, jars, output: proc.tail(r.output, r.code === 0 ? 25 : 120) };
 }
 
-module.exports = { runWorldPainterScript, wpscriptPath, worldPainterInfo, generateHeightmap, STYLES, listWorlds, installDatapack, savesDir, createFabricProject, gradleBuild, findJdk };
+module.exports = { runWorldPainterScript, wpscriptPath, worldPainterInfo, generateHeightmap, STYLES, listWorlds, installDatapack, savesDir, createFabricProject, gradleBuild, findJdk, portableJdk };

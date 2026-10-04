@@ -8,7 +8,7 @@ const store = require('./src/core/store');
 const { GAMES, CORE, detectAll, detectMinecraftProfiles, publicInfo } = require('./src/core/games');
 
 let win = null;
-let mods, plugins, archives, diagnostics, tools, ai, downloads, modrinth, nexus, loaders, workshop, mcx, beth, engine, thunderstore, vfs;
+let mods, plugins, archives, diagnostics, tools, ai, downloads, modrinth, nexus, loaders, workshop, mcx, beth, engine, thunderstore, vfs, saves, precombines, playtest, toolstore;
 
 const pendingApprovals = new Map();
 
@@ -45,6 +45,11 @@ function loadCore() {
   engine = require('./src/core/engine');
   thunderstore = require('./src/core/sources/thunderstore');
   vfs = require('./src/core/vfs');
+  saves = require('./src/core/saves');
+  precombines = require('./src/core/precombines');
+  playtest = require('./src/core/playtest');
+  toolstore = require('./src/core/toolstore');
+  playtest.setLauncher((gameId) => launchGame(gameId));
 }
 
 function settings() {
@@ -539,6 +544,27 @@ function registerIpc() {
   handle('diag:crashLogs', (gameId) => diagnostics.listCrashLogs(gameId));
   handle('diag:read', (file) => diagnostics.readText(file, 200000));
 
+  // Save games
+  handle('saves:list', (gameId) => saves.list(gameId));
+  handle('saves:thumb', (gameId, file) => {
+    const shot = saves.screenshot(gameId, file);
+    if (!shot) return null;
+    const img = nativeImage.createFromBitmap(shot.bgra, { width: shot.width, height: shot.height });
+    return img.resize({ width: Math.min(320, shot.width) }).toDataURL();
+  });
+  handle('saves:analyze', (gameId, file) => saves.analyze(gameId, file));
+  handle('saves:clean', (gameId, file, ops) => saves.clean(gameId, file, ops));
+  handle('saves:backups', (gameId) => saves.listBackups(gameId));
+  handle('saves:restore', (gameId, id) => saves.restoreBackup(gameId, id));
+  handle('saves:backupAll', (gameId) => saves.backupAll(gameId));
+  handle('saves:trash', (gameId, files) => saves.trash(gameId, files));
+  handle('saves:cleanupJunk', (gameId) => saves.cleanupJunk(gameId));
+  handle('saves:open', (gameId) => shell.openPath(saves.savesDir(gameId)));
+
+  // Precombines / previs (Fallout 4)
+  handle('precombines:analyze', (gameId) => precombines.analyze(gameId));
+  handle('precombines:apply', (gameId, suggestions) => precombines.applySuggestions(gameId, suggestions));
+
   handle('settings:set', (patch) => {
     const s = settings();
     Object.assign(s, patch);
@@ -588,6 +614,11 @@ function registerIpc() {
       pendingApprovals.delete(id);
     }
   };
+  handle('ai:steer', (chatId, text, images) => ai.steer(chatId, text, images || []));
+  handle('playtest:status', (gameId) => playtest.status(gameId));
+  handle('playtest:stop', (gameId) => playtest.stop(gameId));
+  handle('toolstore:list', (gameId) => toolstore.list(gameId));
+  handle('toolstore:install', (gameId, id) => toolstore.install(gameId, id));
   handle('ai:approve', (id, ok) => {
     pendingApprovals.get(id)?.resolve(!!ok);
     pendingApprovals.delete(id);
@@ -984,6 +1015,19 @@ if (!isSelfTest && !isCapture && !app.requestSingleInstanceLock()) {
         await wait(3000);
         await win.webContents.executeJavaScript(`console.error('SMOKE-PROBE')`);
         await wait(200);
+        if (process.env.SHURIKEN_SMOKE_JS) {
+          // Dev aid: run a scripted interaction and save what it returns.
+          let out;
+          try {
+            out = await win.webContents.executeJavaScript(fs.readFileSync(process.env.SHURIKEN_SMOKE_JS, 'utf8'));
+          } catch (e) {
+            out = `THREW: ${e.message}`;
+          }
+          fs.writeFileSync(path.join(dir, 'smoke-js.json'), JSON.stringify({ out, problems }, null, 1));
+          fs.writeFileSync(path.join(dir, 'after.png'), (await win.webContents.capturePage()).toPNG());
+          app.quit();
+          return;
+        }
         const games = (process.env.SHURIKEN_SMOKE_GAMES || 'fallout4,starfield,minecraft,sims4,valheim,cyberpunk2077,skyrimse').split(',');
         const pages = ['library', 'dashboard', 'mods', 'plugins', 'browse', 'downloads', 'ai', 'workshop', 'tools', 'diagnostics', 'settings'];
         for (const gameId of games) {

@@ -4,10 +4,10 @@ AI-powered multi-game mod manager, modpack assembler and mod workshop for Window
 
 ## Download
 
-Go to **[Releases](../../releases/latest)** and download `Shuriken-0.5.0-Windows.zip`. Extract it and open **READ FIRST.txt** for the full setup guide.
+Go to **[Releases](../../releases/latest)** and download `Shuriken-0.6.0-Windows.zip`. Extract it and open **READ FIRST.txt** for the full setup guide.
 
 Quick start:
-1. Run `Shuriken Setup 0.5.0.exe`. Windows SmartScreen may warn about an unsigned app: click **More info → Run anyway**.
+1. Run `Shuriken Setup 0.6.0.exe`. Windows SmartScreen may warn about an unsigned app: click **More info → Run anyway**.
 2. Shuriken finds your Steam games automatically. Use **Game Library** for everything else.
 3. For the free AI: **Settings → AI assistant → Set up Shuriken AI**. Shuriken downloads its built-in engine (llama.cpp, Vulkan) and a Qwen3-VL model once (3–6 GB). No account, no API key, nothing else to install.
 4. Install mods (drag archives in, or use **Get Mods**), click **Deploy**, then **Play**.
@@ -35,6 +35,10 @@ npm run selftest                        # headless checks (fake game folders for
 - **Staging + hardlink deployment** (like Vortex): tools such as xEdit, the Creation Kit and LOOT see deployed mods without a virtual file system. Purge restores the original files.
 - **Profiles** keep separate enabled sets, priorities and load orders; **instances** are fully separate mod setups per game (like MO2 instances). **FOMOD** installers get a wizard.
 - **Virtual mode (MO2-style)**, per game: the game folder stays untouched and mods are layered in at launch through [usvfs](https://github.com/ModOrganizer2/usvfs), the virtual file system Mod Organizer 2 uses (downloaded on first use). Per-profile `plugins.txt`, INIs and saves; new files go to Overwrite. Script extender loaders/ENB/DLL proxies are placed in the game folder automatically (what MO2's Root Builder does). The launcher in `vfs-helper/` is GPL-3.0 because it loads usvfs.
+- **Saves tab** (Bethesda games): screenshots, character info, missing plugins, corrupt/leftover file cleanup, backups and restore. Skyrim and Fallout 4 saves get a deep check and cleaning (orphaned/undefined scripts and stuck threads from removed mods) through the ReSaver engine from [FallrimTools](https://github.com/mdfairch/FallrimTools) (Apache-2.0), bundled as `src/core/bin/shuriken-savetool.jar` (source of the small CLI front end in `save-tool/`).
+- **Precombines & previs** (Fallout 4): scans the load order for mods that break precombined meshes/previs, cells that lost them and previs patches overridden by older data; detects PRP and applies safe load-order fixes.
+- **Playtest mode**: the AI launches the game, loads a save or travels to a place (Bethesda console), takes screenshots, moves the camera, inspects objects and reads console output, then fixes what it finds; you can keep messaging it while it plays. Input and capture go through `src/core/bin/shuriken-input.exe` (source: `vfs-helper/ShurikenInput.cs`, MIT).
+- **Tool downloads**: free tools (xEdit, LOOT, Wrye Bash, NifSkope, texconv, Blockbench, AssetRipper, UABEA, FModel, dnSpyEx) install from their official GitHub releases; the AI can install them or ask the user for others.
 - **AI assistant**: the built-in Shuriken AI engine (free, on your PC), or Claude with your own API key. It reads mod lists, load orders, plugin headers, archives, INIs, crash logs and screenshots. It also drives tools:
   - **xEdit:** cleaning and generated scripts.
   - **Creation Kit:** precombines/previs and the Papyrus compiler.
