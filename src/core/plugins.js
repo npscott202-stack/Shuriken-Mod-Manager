@@ -85,9 +85,11 @@ function readPluginsTxt(game) {
   let order = [];
   if (game.timestampOrder && game.installDir) {
     const data = path.join(game.installDir, 'Data');
+    const virtual = game.pluginFiles ? game.pluginFiles() : null;
+    const entries = virtual ? [...virtual.values()].map((v) => [v.name, v.path]) : null;
     try {
-      order = fs.readdirSync(data).filter((f) => PLUGIN_RE.test(f))
-        .map((f) => ({ f, t: fs.statSync(path.join(data, f)).mtimeMs, m: /\.esm$/i.test(f) }))
+      order = (entries || fs.readdirSync(data).filter((f) => PLUGIN_RE.test(f)).map((f) => [f, path.join(data, f)]))
+        .map(([f, full]) => ({ f, t: fs.statSync(full).mtimeMs, m: /\.esm$/i.test(f) }))
         .sort((a, b) => (b.m - a.m) || (a.t - b.t)).map((x) => x.f);
     } catch {
       order = [];
@@ -121,9 +123,11 @@ function writePluginsTxt(game, list) {
   if (game.timestampOrder && game.installDir) {
     const data = path.join(game.installDir, 'Data');
     const base = new Date('2008-01-01T00:00:00Z').getTime() / 1000;
+    const virtual = game.pluginFiles ? game.pluginFiles() : null;
     [...implicitList(game), ...list.map((p) => p.name)].forEach((name, i) => {
       try {
-        fs.utimesSync(path.join(data, name), base + i * 60, base + i * 60);
+        const file = virtual?.get(name.toLowerCase())?.path || path.join(data, name);
+        fs.utimesSync(file, base + i * 60, base + i * 60);
       } catch {
         // missing file
       }
@@ -141,8 +145,11 @@ function implicitList(game) {
 function scan(game) {
   const dataDir = path.join(game.installDir, 'Data');
   let files = [];
+  // Virtual mode supplies the plugins the game will see (game folder + enabled mods).
+  const virtual = game.pluginFiles ? game.pluginFiles() : null;
+  const pathOf = (name) => (virtual ? virtual.get(name.toLowerCase())?.path || path.join(dataDir, name) : path.join(dataDir, name));
   try {
-    files = fs.readdirSync(dataDir).filter((f) => PLUGIN_RE.test(f));
+    files = virtual ? [...virtual.values()].map((v) => v.name) : fs.readdirSync(dataDir).filter((f) => PLUGIN_RE.test(f));
   } catch {
     return { implicit: [], plugins: [] };
   }
@@ -162,7 +169,7 @@ function scan(game) {
   const fresh = files.filter((f) => !seen.has(f.toLowerCase()) && !implicitSet.has(f.toLowerCase()));
   const info = (name) => {
     try {
-      const h = readHeader(path.join(dataDir, name), game.headerSize || 24);
+      const h = readHeader(pathOf(name), game.headerSize || 24);
       return { ...h, ...describeFlags(game, name, h.flags) };
     } catch (e) {
       return { error: e.message, masters: [], isMaster: false, isLight: false };

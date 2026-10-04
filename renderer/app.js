@@ -194,15 +194,22 @@ function renderTopbar() {
   const page = PAGES.find((p) => p.id === state.page);
   $('#pageTitle').textContent = page.label;
   $('#pageSub').textContent = g ? `${g.name}${g.installDir ? '' : ' (folder not set)'}` : '';
+  const inst = $('#instanceSelect');
+  inst.replaceChildren(
+    ...g.instances.list.map((n) => h('option', { value: n, selected: n === g.instances.active }, `Instance: ${n}`)),
+    h('option', { value: '__new' }, '+ New instance…'),
+    g.instances.active !== 'Default' ? h('option', { value: '__del' }, `− Delete "${g.instances.active}"`) : null,
+  );
   const sel = $('#profileSelect');
   sel.replaceChildren(
     ...g.profiles.names.map((n) => h('option', { value: n, selected: n === g.profiles.active }, `Profile: ${n}`)),
     h('option', { value: '__new' }, '+ New profile…'),
-    g.profiles.names.length > 1 ? h('option', { value: '__del' }, `− Delete "${g.profiles.active}"`) : null,
+    h('option', { value: '__manage' }, '⚙ Manage profiles…'),
   );
   const pill = $('#deployPill');
   const text = $('#deployText');
   if (!g.installDir) { pill.className = 'pill err'; text.textContent = 'Game folder not set'; }
+  else if (g.deployMode === 'virtual') { pill.className = 'pill ok'; text.textContent = g.deployment.dirty ? 'Virtual · applies at launch' : 'Virtual · game folder clean'; }
   else if (g.deployment.dirty) { pill.className = 'pill warn'; text.textContent = 'Changes not deployed'; }
   else if (g.deployment.deployedAt) { pill.className = 'pill ok'; text.textContent = `Deployed · ${g.deployment.files} files`; }
   else { pill.className = 'pill'; text.textContent = 'Nothing deployed'; }
@@ -391,7 +398,7 @@ async function pageDashboard() {
       statCard('bolt', String(conflicts), 'file conflicts'),
       statCard('clock', g.deployment.deployedAt ? new Date(g.deployment.deployedAt).toLocaleDateString() : '—', g.deployment.dirty ? 'last deployed · changes pending' : 'last deployed'),
     ),
-    g.kind === 'minecraft' ? minecraftCard(g) : null,
+    g.kind === 'minecraft' ? minecraftCard(g) : deploymentCard(g),
     h('div', { class: 'grid cols-2' },
       h('div', { class: 'card' },
         h('h3', {}, 'Health check', h('button', { class: 'btn small right', onClick: () => askAi('Run a health check on my setup and fix whatever you can. Explain each problem first.') }, '✦ Fix with AI')),
@@ -404,6 +411,29 @@ async function pageDashboard() {
               h('button', { class: 'btn small', onClick: () => askAi(`My game crashed. Analyze this crash log and tell me what caused it and how to fix it: ${l.path}`) }, '✦ Analyze')))
           : h('div', { class: 'muted' }, 'No crash logs found. Install Buffout 4 / Crash Logger to get detailed crash logs.')),
     ),
+  );
+}
+
+function deploymentCard(g) {
+  const choose = async (mode) => {
+    if (mode === g.deployMode) return;
+    const msg = mode === 'virtual'
+      ? 'Switch to Virtual mode (like Mod Organizer 2)?\n\nShuriken removes the mod files it put in the game folder, and from now on mods are shown to the game through a virtual file system when you press Play or launch a tool from Shuriken. Only script extender loaders / ENB / DLL plugins are placed in the game folder.\n\nImportant: start the game and tools from Shuriken, otherwise they only see the vanilla game.'
+      : 'Switch to Hardlink mode (like Vortex)?\n\nMods will be linked into the game folder when you click Deploy, so the game and tools see them however you start them.';
+    if (!confirm(msg)) return;
+    await run(() => api.call('mode:set', g.id, mode), mode === 'virtual' ? 'Virtual mode on: your game folder is clean.' : 'Hardlink mode on: click Deploy to apply your mods.');
+    await refreshGame();
+    renderPage();
+  };
+  return h('div', { class: 'card', style: { marginBottom: '16px' } },
+    h('h3', {}, 'How mods are applied', h('span', { class: 'right faint small' }, `Instance: ${g.instances.active} · Profile: ${g.profiles.active}`)),
+    h('div', { class: 'grid cols-2' },
+      ...[['hardlink', 'Hardlink (Vortex-style)', 'Mods are linked into the game folder when you Deploy. Works no matter how you start the game.'],
+        ['virtual', 'Virtual (MO2-style)', 'The game folder stays untouched. Mods are layered in virtually when you start the game or a tool from Shuriken. Switch profiles and instances instantly; per-profile INIs and saves.']]
+        .map(([mode, title, text]) => h('div', { class: `fomod-opt ${g.deployMode === mode ? 'selected' : ''}`, style: { alignItems: 'flex-start', cursor: 'pointer', borderColor: g.deployMode === mode ? 'var(--accent)' : '' }, onClick: () => choose(mode) },
+          h('input', { type: 'radio', checked: g.deployMode === mode, style: { marginTop: '4px' } }),
+          h('div', {}, h('div', { class: 'name' }, title), h('div', { class: 'muted small' }, text))))),
+    g.deployMode === 'virtual' && g.overwriteCount ? h('div', { class: 'small muted', style: { marginTop: '10px' } }, `Overwrite holds ${g.overwriteCount} file(s) created by the game or tools. Manage them on the Mods page.`) : null,
   );
 }
 
@@ -626,6 +656,7 @@ async function pageMods() {
         renderPage();
       } }, 'Purge'),
     ),
+    g.deployMode === 'virtual' ? overwritePanel(g) : null,
     h('div', { class: 'split' },
       h('div', { class: 'grow' },
         h('table', { class: 'table' },
@@ -634,6 +665,20 @@ async function pageMods() {
       detail),
     h('p', { class: 'faint small' }, 'Drag rows to change priority. Mods lower in the list win file conflicts (▲ overwrites others, ▼ is overwritten).'),
   );
+}
+
+// Overwrite: files the game/tools created while running in virtual mode (like MO2's Overwrite).
+function overwritePanel(g) {
+  const box = h('div', { class: 'issue info', style: { marginBottom: '14px' } }, h('span', { class: 'sev' }), h('div', { class: 'txt' }, 'Overwrite: checking…'));
+  api.call('overwrite:list', g.id).then((files) => {
+    box.replaceChildren(h('span', { class: 'sev', style: { background: files.length ? 'var(--warn)' : 'var(--ok)' } }),
+      h('div', { class: 'txt' }, h('div', { class: 'name' }, `Overwrite · ${files.length} file${files.length === 1 ? '' : 's'}`),
+        h('div', { class: 'faint small' }, files.length ? files.slice(0, 4).join(', ') + (files.length > 4 ? ' …' : '') : 'New files from the game and tools (configs, generated plugins, logs) land here, never in the game folder.')),
+      h('button', { class: 'btn small', onClick: () => api.call('overwrite:open', g.id) }, 'Open'),
+      files.length ? h('button', { class: 'btn small primary', onClick: async () => { const name = await askText('Create a mod from Overwrite', 'e.g. My generated patches'); if (name) { await run(() => api.call('overwrite:toMod', g.id, name), 'Mod created from Overwrite'); await refreshGame(); renderPage(); } } }, 'Create mod') : null,
+      files.length ? h('button', { class: 'btn small ghost danger', onClick: async () => { if (confirm(`Delete all ${files.length} files in Overwrite?`)) { await run(() => api.call('overwrite:clear', g.id), 'Overwrite cleared'); renderPage(); } } }, 'Clear') : null);
+  }).catch(() => {});
+  return box;
 }
 
 function dragRow(tr, onDrop) {
@@ -1547,7 +1592,8 @@ $('#deployBtn').addEventListener('click', async () => {
   btn.textContent = 'Deploying…';
   try {
     const r = await api.call('deploy', state.gameId);
-    toast(`Deployed ${r.total} files (${r.linked} linked${r.copied ? `, ${r.copied} copied` : ''})`, 'success');
+    if (r.virtual) toast(`Ready: ${r.total} mods will load virtually at launch${r.rootFiles ? ` (${r.rootFiles} loader/ENB files placed in the game folder)` : ''}.`, 'success');
+    else toast(`Deployed ${r.total} files (${r.linked} linked${r.copied ? `, ${r.copied} copied` : ''})`, 'success');
     await refreshGame();
     if (['plugins', 'dashboard', 'mods'].includes(state.page)) renderPage();
   } catch (e) {
@@ -1580,14 +1626,67 @@ $('#profileSelect').addEventListener('change', async (e) => {
       await run(() => api.call('profiles:create', g.id, name, g.profiles.active), 'Profile created');
       await api.call('profiles:switch', g.id, name);
     }
-  } else if (v === '__del') {
-    if (confirm(`Delete profile "${g.profiles.active}"?`)) await run(() => api.call('profiles:delete', g.id, g.profiles.active), 'Profile deleted');
+  } else if (v === '__manage') {
+    renderTopbar();
+    return manageProfiles();
   } else {
-    await run(() => api.call('profiles:switch', g.id, v), `Switched to ${v}. Deploy to apply.`);
+    await run(() => api.call('profiles:switch', g.id, v), g.deployMode === 'virtual' ? `Switched to ${v}.` : `Switched to ${v}. Deploy to apply.`);
   }
   await refreshGame();
   renderPage();
 });
+
+$('#instanceSelect').addEventListener('change', async (e) => {
+  const g = game();
+  const v = e.target.value;
+  try {
+    if (v === '__new') {
+      const name = await askText('New instance: a fully separate mod setup for this game', 'e.g. Survival build, Testing');
+      if (name) {
+        const copy = confirm(`Copy your current mods and profiles into "${name}"?\n\nOK = start from a copy (uses extra disk space)\nCancel = start empty`);
+        await run(() => api.call('instances:create', g.id, name, copy), 'Instance created');
+        await run(() => api.call('instances:switch', g.id, name), `Switched to instance ${name}`);
+      }
+    } else if (v === '__del') {
+      if (confirm(`Delete instance "${g.instances.active}" and all of its mods? This cannot be undone.`)) await run(() => api.call('instances:delete', g.id, g.instances.active), 'Instance deleted');
+    } else {
+      await run(() => api.call('instances:switch', g.id, v), g.deployMode === 'virtual' ? `Instance ${v}` : `Instance ${v}: click Deploy to apply its mods`);
+    }
+  } catch {
+    // run() already showed the error
+  }
+  state.selectedMod = null;
+  await refreshGame();
+  renderPage();
+});
+
+// Profile manager (MO2-style): rename/duplicate/delete and per-profile INIs and saves.
+async function manageProfiles() {
+  const g = await refreshGame();
+  const virtual = g.deployMode === 'virtual';
+  const body = h('div', {},
+    h('p', { class: 'muted small' }, virtual
+      ? 'Profiles share this instance\'s mods but keep their own enabled list, mod order and load order. In virtual mode a profile can also keep its own INI settings and save games.'
+      : 'Profiles share this instance\'s mods but keep their own enabled list, mod order and load order. Switch to Virtual mode on the Dashboard for per-profile INIs and saves.'),
+    g.profiles.names.map((name) => {
+      const o = g.profileOptions[name] || {};
+      return h('div', { class: 'card', style: { marginBottom: '10px', padding: '14px' } },
+        h('div', { class: 'row', style: { marginBottom: '10px' } },
+          h('div', { class: 'name grow' }, name, name === g.profiles.active ? h('span', { class: 'badge win', style: { marginLeft: '8px' } }, 'active') : null),
+          name !== g.profiles.active ? h('button', { class: 'btn small primary', onClick: async () => { await run(() => api.call('profiles:switch', g.id, name)); closeModal(); await refreshGame(); renderPage(); } }, 'Switch') : null,
+          h('button', { class: 'btn small', onClick: async () => { const to = await askText(`Rename "${name}"`, name); if (to) { await run(() => api.call('profiles:rename', g.id, name, to), 'Renamed'); manageProfiles(); } } }, 'Rename'),
+          h('button', { class: 'btn small', onClick: async () => { const to = await askText(`Duplicate "${name}" as`, `${name} copy`); if (to) { await run(() => api.call('profiles:create', g.id, to, name), 'Profile duplicated'); manageProfiles(); } } }, 'Duplicate'),
+          h('button', { class: 'btn small ghost', onClick: () => api.call('profiles:openFolder', g.id, name) }, 'Folder'),
+          g.profiles.names.length > 1 ? h('button', { class: 'btn small ghost danger', onClick: async () => { if (confirm(`Delete profile "${name}"?`)) { await run(() => api.call('profiles:delete', g.id, name), 'Profile deleted'); manageProfiles(); } } }, 'Delete') : null),
+        g.kind === 'bethesda' ? h('div', { class: 'row wrap', style: { gap: '18px' } },
+          h('label', { class: 'row', style: { opacity: virtual ? 1 : 0.5 } }, toggle(o.localInis, async (v) => { await run(() => api.call('profiles:options', g.id, name, { localInis: v })); }, virtual ? '' : 'Virtual mode only'), h('span', { class: 'small' }, 'Profile-specific INI files')),
+          h('label', { class: 'row', style: { opacity: virtual ? 1 : 0.5 } }, toggle(o.localSaves, async (v) => { await run(() => api.call('profiles:options', g.id, name, { localSaves: v })); }, virtual ? '' : 'Virtual mode only'), h('span', { class: 'small' }, 'Profile-specific save games'))) : null);
+    }),
+  );
+  showModal(`Profiles · ${g.short} · instance ${g.instances.active}`, body);
+  if (!virtual) body.querySelectorAll('.toggle input').forEach((i) => { i.disabled = true; });
+  refreshGame();
+}
 
 // window.prompt() is not available in Electron, so ask for text with a small modal.
 function askText(title, placeholder = '') {

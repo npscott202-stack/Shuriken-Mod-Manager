@@ -1,7 +1,7 @@
 {
   "name": "shuriken",
   "productName": "Shuriken",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Shuriken: AI-powered multi-game mod manager, modpack assembler and mod workshop.",
   "main": "main.js",
   "author": "Shuriken",
@@ -43,7 +43,8 @@
     ],
     "asarUnpack": [
       "node_modules/7zip-bin/**/*",
-      "src/core/scripts/**/*"
+      "src/core/scripts/**/*",
+      "src/core/bin/**/*"
     ],
     "win": {
       "icon": "assets/icon.png",

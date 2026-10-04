@@ -4,10 +4,10 @@ AI-powered multi-game mod manager, modpack assembler and mod workshop for Window
 
 ## Download
 
-Go to **[Releases](../../releases/latest)** and download `Shuriken-0.4.0-Windows.zip`. Extract it and open **READ FIRST.txt** for the full setup guide.
+Go to **[Releases](../../releases/latest)** and download `Shuriken-0.5.0-Windows.zip`. Extract it and open **READ FIRST.txt** for the full setup guide.
 
 Quick start:
-1. Run `Shuriken Setup 0.4.0.exe`. Windows SmartScreen may warn about an unsigned app: click **More info → Run anyway**.
+1. Run `Shuriken Setup 0.5.0.exe`. Windows SmartScreen may warn about an unsigned app: click **More info → Run anyway**.
 2. Shuriken finds your Steam games automatically. Use **Game Library** for everything else.
 3. For the free AI: **Settings → AI assistant → Set up Shuriken AI**. Shuriken downloads its built-in engine (llama.cpp, Vulkan) and a Qwen3-VL model once (3–6 GB). No account, no API key, nothing else to install.
 4. Install mods (drag archives in, or use **Get Mods**), click **Deploy**, then **Play**.
@@ -33,7 +33,8 @@ npm run selftest                        # headless checks (fake game folders for
 ## How it works
 
 - **Staging + hardlink deployment** (like Vortex): tools such as xEdit, the Creation Kit and LOOT see deployed mods without a virtual file system. Purge restores the original files.
-- **Profiles** keep separate enabled sets, priorities and load orders. **FOMOD** installers get a wizard.
+- **Profiles** keep separate enabled sets, priorities and load orders; **instances** are fully separate mod setups per game (like MO2 instances). **FOMOD** installers get a wizard.
+- **Virtual mode (MO2-style)**, per game: the game folder stays untouched and mods are layered in at launch through [usvfs](https://github.com/ModOrganizer2/usvfs), the virtual file system Mod Organizer 2 uses (downloaded on first use). Per-profile `plugins.txt`, INIs and saves; new files go to Overwrite. Script extender loaders/ENB/DLL proxies are placed in the game folder automatically (what MO2's Root Builder does). The launcher in `vfs-helper/` is GPL-3.0 because it loads usvfs.
 - **AI assistant**: the built-in Shuriken AI engine (free, on your PC), or Claude with your own API key. It reads mod lists, load orders, plugin headers, archives, INIs, crash logs and screenshots. It also drives tools:
   - **xEdit:** cleaning and generated scripts.
   - **Creation Kit:** precombines/previs and the Papyrus compiler.

@@ -182,7 +182,7 @@ function setupSummary(gameId) {
   const list = mods.listMods(gameId);
   const nameOf = (id) => s.mods[id]?.name || id;
   return {
-    summary: `${g.name}: ${list.filter((m) => m.enabled).length} of ${list.length} Shuriken-managed mods enabled, profile "${s.activeProfile}", changes ${s.deployment.dirty ? 'not deployed yet' : 'deployed'}.`,
+    summary: `${g.name}: ${list.filter((m) => m.enabled).length} of ${list.length} Shuriken-managed mods enabled, profile "${s.activeProfile}", instance "${g.instance}", ${g.deployMode === 'virtual' ? 'virtual mode (MO2-style: mods are served by a virtual file system at launch; the game folder stays clean; new files land in Overwrite)' : `hardlink mode, changes ${s.deployment.dirty ? 'not deployed yet' : 'deployed'}`}.`,
     game: g.name,
     installDir: g.installDir,
     stagingDir: mods.stagingDir(gameId),

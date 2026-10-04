@@ -53,6 +53,11 @@ function readText(file, maxChars = 60000) {
 function iniPath(gameId, fileName) {
   const g = mods.game(gameId);
   if (g.kind !== 'bethesda') throw new Error('INI files only apply to Bethesda games');
+  // Virtual mode with profile-specific INIs: edit the profile's copy (the game sees it through the VFS).
+  if (g.deployMode === 'virtual' && mods.profile(gameId).localInis) {
+    const own = path.join(mods.profileDir(gameId), 'ini', fileName);
+    if (fs.existsSync(own) || !fs.existsSync(path.join(g.myGames(), fileName))) return own;
+  }
   const candidates = [path.join(g.myGames(), fileName), g.installDir && path.join(g.installDir, fileName)].filter(Boolean);
   return candidates.find((p) => fs.existsSync(p)) || candidates[0];
 }
@@ -174,7 +179,7 @@ async function healthCheck(gameId) {
   const s = mods.state(gameId);
   const issues = [];
   if (!g.installDir) return { issues: [{ severity: 'error', message: `${g.name} folder not set.` }] };
-  if (s.deployment.dirty) issues.push({ severity: 'warning', message: 'Mod changes are not deployed yet. Click Deploy.' });
+  if (s.deployment.dirty && Object.keys(s.mods).length) issues.push({ severity: 'warning', message: mods.deployMode(gameId) === 'virtual' ? 'Loader/ENB files changed: click Deploy (or just press Play).' : 'Mod changes are not deployed yet. Click Deploy.' });
   const unsure = Object.values(s.mods).filter((m) => m.uncertain);
   for (const m of unsure) issues.push({ severity: 'warning', message: `"${m.name}" has an unusual folder layout; check it installed to the right place.` });
 

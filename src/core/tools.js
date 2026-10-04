@@ -172,9 +172,17 @@ function byId(gameId, toolId) {
   return (s.tools || []).find((t) => t.id === toolId) || suggestions(gameId).find((t) => t.path === toolId) || null;
 }
 
-function launch(gameId, toolId, extraArgs = []) {
+// In virtual mode every tool runs inside the VFS so it sees the same Data folder as the game.
+const isVirtual = (gameId) => mods.deployMode(gameId) === 'virtual';
+const vfs = () => require('./vfs');
+
+async function launch(gameId, toolId, extraArgs = []) {
   const tool = byId(gameId, toolId);
   if (!tool) throw new Error('Tool not found. Add it on the Tools page.');
+  if (isVirtual(gameId)) {
+    await vfs().launch(gameId, { exe: tool.path, args: vfs().joinArgs([...(tool.args || []), ...extraArgs]), cwd: path.dirname(tool.path) });
+    return { launched: `${tool.name} (virtual)` };
+  }
   const child = spawn(tool.path, [...(tool.args || []), ...extraArgs], { cwd: path.dirname(tool.path), detached: true, stdio: 'ignore' });
   child.unref();
   return { launched: tool.name };
@@ -185,6 +193,10 @@ async function runTool(gameId, toolId, args = [], { wait = true, timeoutMin = 30
   const tool = byId(gameId, toolId);
   if (!tool) throw new Error('Tool not registered. Only tools on the Tools page can be run.');
   if (!wait) return launch(gameId, toolId, args);
+  if (isVirtual(gameId)) {
+    const r = await vfs().launch(gameId, { exe: tool.path, args: vfs().joinArgs([...(tool.args || []), ...args]), cwd: path.dirname(tool.path), wait: true, timeoutMs: timeoutMin * 60000 });
+    return { tool: tool.name, virtual: true, events: r.events, note: 'Ran inside the virtual file system; new files it wrote are in Overwrite.' };
+  }
   const r = await proc.run(tool.path, [...(tool.args || []), ...args], { cwd: path.dirname(tool.path), timeoutMs: timeoutMin * 60000, hidden: false });
   return { tool: tool.name, exitCode: r.code, output: proc.tail(r.output, 150) };
 }
@@ -211,11 +223,15 @@ function xeditBaseArgs(gameId, tool) {
 
 // Runs xEdit through xedit-runner.ps1, which dismisses xEdit's startup message, confirms the
 // preselected plugins and (with autoSave) confirms saving, so runs finish unattended.
-async function runXedit(tool, args, { autoSave = false, timeoutMin = 45 } = {}) {
+async function runXedit(tool, args, { autoSave = false, timeoutMin = 45, gameId } = {}) {
   const runner = path.join(__dirname, 'scripts', 'xedit-runner.ps1').replace('app.asar', 'app.asar.unpacked');
   const b64 = Buffer.from(JSON.stringify(args), 'utf8').toString('base64');
   const psArgs = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', runner, '-Exe', tool.path, '-ArgsB64', b64, '-TimeoutSec', String(timeoutMin * 60)];
   if (autoSave) psArgs.push('-AutoSave');
+  if (gameId && isVirtual(gameId)) {
+    const run = await vfs().prepareRun(gameId, { exe: tool.path, args: vfs().joinArgs(args), cwd: path.dirname(tool.path) });
+    psArgs.push('-VfsHelper', run.helper, '-VfsConfig', run.cfg);
+  }
   const r = await proc.run('powershell.exe', psArgs, { timeoutMs: (timeoutMin + 2) * 60000 });
   const events = r.output.split(/\r?\n/).filter((l) => l.startsWith('EVENT ') && !l.startsWith('EVENT args')).map((l) => l.slice(6));
   return { timedOut: events.includes('timeout'), events };
@@ -227,7 +243,7 @@ async function xeditQuickClean(gameId, plugin) {
   if (!tool) throw new Error('xEdit (SSEEdit/FO4Edit/SF1Edit) not found. Add it on the Tools page.');
   const args = [...xeditBaseArgs(gameId, tool), '-qac', '-autoexit', '-autoload', plugin];
   const started = Date.now() - 2000;
-  const r = await runXedit(tool, args, { timeoutMin: 20 });
+  const r = await runXedit(tool, args, { timeoutMin: 20, gameId });
   const log = xeditLog(tool, started);
   return { ...r, log: log ? proc.tail(log, 80) : '(no xEdit log found)' };
 }
@@ -249,14 +265,14 @@ async function xeditScript(gameId, script, plugins) {
     args.push(`-P:${pl}`);
   }
   const started = Date.now() - 2000;
-  const r = await runXedit(tool, args, { autoSave: true });
+  const r = await runXedit(tool, args, { autoSave: true, gameId });
   const raw = xeditLog(tool, started);
   const log = raw ? proc.tail(raw.split(/\r?\n/).filter((l) => !/^Using |Mozilla Public License|Source Code Form|^\s*$/.test(l)).join('\n'), 250) : '(xEdit did not write a log)';
   return {
     ...r,
     scriptFile: file,
     log,
-    note: 'Read-only scripts run unattended. Scripts that create or modify plugins load the whole load order (minutes for big setups) and xEdit may wait for the user to confirm in its window; if this run timed out, ask the user to watch the xEdit window and click OK when asked, then run it again. New plugins are created in the game Data folder: use workshop_capture to move them into a workshop project.',
+    note: (isVirtual(gameId) ? 'Virtual mode: new plugins xEdit creates land in Overwrite (use "Create mod from Overwrite" or workshop_capture). ' : '') + 'Read-only scripts run unattended. Scripts that create or modify plugins load the whole load order (minutes for big setups) and xEdit may wait for the user to confirm in its window; if this run timed out, ask the user to watch the xEdit window and click OK when asked, then run it again. New plugins are created in the game Data folder: use workshop_capture to move them into a workshop project.',
   };
 }
 
@@ -264,7 +280,12 @@ async function lootSort(gameId) {
   const tool = find(gameId, 'loot');
   if (!tool) throw new Error('LOOT not found. Install it from loot.github.io or add it on the Tools page.');
   const LOOT_GAME = { skyrimse: 'Skyrim Special Edition', fallout4: 'Fallout4', starfield: 'Starfield' };
-  const r = await proc.run(tool.path, [`--game=${LOOT_GAME[gameId]}`, '--auto-sort'], { cwd: path.dirname(tool.path), timeoutMs: 10 * 60000, hidden: false });
+  const lootArgs = [`--game=${LOOT_GAME[gameId]}`, '--auto-sort'];
+  if (isVirtual(gameId)) {
+    await vfs().launch(gameId, { exe: tool.path, args: vfs().joinArgs(lootArgs), cwd: path.dirname(tool.path), wait: true, timeoutMs: 10 * 60000 });
+    return { virtual: true };
+  }
+  const r = await proc.run(tool.path, lootArgs, { cwd: path.dirname(tool.path), timeoutMs: 10 * 60000, hidden: false });
   return { exitCode: r.code };
 }
 

@@ -125,7 +125,8 @@ function capture(projectId, dataPaths) {
   const p = get(projectId);
   if (p.kind !== 'bethesda-mod') throw new Error('Capture is for Bethesda projects.');
   const g = mods.game(p.gameId);
-  const data = path.join(g.installDir, 'Data');
+  // Virtual mode: tools write new files into Overwrite instead of the real Data folder.
+  const data = g.deployMode === 'virtual' ? mods.overwriteDir(p.gameId) : path.join(g.installDir, 'Data');
   const deployed = mods.state(p.gameId).deployment.files || {};
   const moved = [];
   for (const rel of dataPaths) {

@@ -8,7 +8,7 @@ const store = require('./src/core/store');
 const { GAMES, CORE, detectAll, detectMinecraftProfiles, publicInfo } = require('./src/core/games');
 
 let win = null;
-let mods, plugins, archives, diagnostics, tools, ai, downloads, modrinth, nexus, loaders, workshop, mcx, beth, engine, thunderstore;
+let mods, plugins, archives, diagnostics, tools, ai, downloads, modrinth, nexus, loaders, workshop, mcx, beth, engine, thunderstore, vfs;
 
 const pendingApprovals = new Map();
 
@@ -44,6 +44,7 @@ function loadCore() {
   beth = require('./src/core/integrations/bethesda');
   engine = require('./src/core/engine');
   thunderstore = require('./src/core/sources/thunderstore');
+  vfs = require('./src/core/vfs');
 }
 
 function settings() {
@@ -175,6 +176,10 @@ async function launchGame(gameId) {
   // Script extender loader first (Bethesda), then the game's own exe, then Steam.
   const candidates = [g.loader, g.exe].filter(Boolean).map((rel) => path.join(g.installDir, rel));
   const exe = candidates.find((p) => fs.existsSync(p));
+  if (exe && mods.deployMode(gameId) === 'virtual') {
+    await vfs.launch(gameId, { exe, cwd: path.dirname(exe) });
+    return { launched: `${path.basename(exe)} (virtual mods)` };
+  }
   if (exe) {
     spawn(exe, [], { cwd: path.dirname(exe), detached: true, stdio: 'ignore' }).unref();
     return { launched: path.basename(exe) };
@@ -238,6 +243,10 @@ function gameView(gameId) {
     scriptExtender: g.kind === 'bethesda' && g.installDir ? fs.existsSync(path.join(g.installDir, g.loader)) : null,
     scriptExtenderName: GAMES[gameId].scriptExtender || null,
     mcProfiles: g.kind === 'minecraft' && g.installDir ? detectMinecraftProfiles(g.installDir) : [],
+    deployMode: mods.deployMode(gameId),
+    instances: mods.instances(gameId),
+    profileOptions: Object.fromEntries(Object.entries(s.profiles).map(([name, p]) => [name, { localInis: !!p.localInis, localSaves: !!p.localSaves }])),
+    overwriteCount: s.installDir && mods.deployMode(gameId) === 'virtual' ? vfs.overwriteFiles(gameId).length : 0,
   };
 }
 
@@ -394,6 +403,20 @@ function registerIpc() {
     return img.isEmpty() ? null : img.resize({ width: 480 }).toDataURL();
   });
 
+  handle('instances:create', (gameId, name, copy) => mods.createInstance(gameId, name, copy));
+  handle('instances:switch', (gameId, name) => mods.switchInstance(gameId, name));
+  handle('instances:delete', (gameId, name) => mods.deleteInstance(gameId, name));
+  handle('mode:set', async (gameId, mode) => {
+    if (mode === 'virtual') await vfs.ensureUsvfs((ev) => send('engine:progress', ev));
+    return mods.setDeployMode(gameId, mode);
+  });
+  handle('profiles:options', (gameId, name, opts) => mods.setProfileOptions(gameId, name, opts));
+  handle('profiles:rename', (gameId, from, to) => mods.renameProfile(gameId, from, to));
+  handle('profiles:openFolder', (gameId, name) => shell.openPath(mods.profileDir(gameId, name)));
+  handle('overwrite:list', (gameId) => vfs.overwriteFiles(gameId));
+  handle('overwrite:toMod', (gameId, name) => vfs.overwriteToMod(gameId, name));
+  handle('overwrite:clear', (gameId) => vfs.clearOverwrite(gameId));
+  handle('overwrite:open', (gameId) => shell.openPath(mods.overwriteDir(gameId)));
   handle('profiles:create', (gameId, name, copyFrom) => mods.createProfile(gameId, name, copyFrom));
   handle('profiles:switch', (gameId, name) => mods.switchProfile(gameId, name));
   handle('profiles:delete', (gameId, name) => mods.deleteProfile(gameId, name));
@@ -689,6 +712,58 @@ async function selfTest() {
       mods.save('valheim');
       fs.rmSync(fake, { recursive: true, force: true });
       throw new Error('done (thunderstore only)');
+    }
+    if (process.env.MODFORGE_ONLY_VFS) {
+      // Virtual mode + instances against a throwaway fake Fallout 4 folder. The "game" is a copy of
+      // cmd.exe that lists what it sees, so nothing real is launched or modified.
+      const os = require('os');
+      const fake = fs.mkdtempSync(path.join(os.tmpdir(), 'shuriken-vfsgame-'));
+      fs.mkdirSync(path.join(fake, 'Data'));
+      fs.copyFileSync(path.join(process.env.SystemRoot, 'System32', 'cmd.exe'), path.join(fake, 'Fallout4.exe'));
+      fs.writeFileSync(path.join(fake, 'Data', 'Fallout4.esm'), Buffer.concat([Buffer.from('TES4'), Buffer.alloc(20)]));
+      const inst = mods.instances('fallout4');
+      const savedActive = inst.active;
+      const st = mods.state('fallout4');
+      const saved = JSON.parse(JSON.stringify(st));
+      Object.keys(st).forEach((k) => delete st[k]);
+      Object.assign(st, { installDir: fake, stagingDir: path.join(fake, '_staging'), mods: {}, profiles: { Default: { order: [], enabled: {}, plugins: null } }, activeProfile: 'Default', deployment: { files: {}, deployedAt: null, dirty: false }, tools: [] });
+      mods.save('fallout4');
+      try {
+        const src = path.join(fake, '_src', 'MyMod', 'Data');
+        fs.mkdirSync(path.join(src, 'meshes'), { recursive: true });
+        fs.writeFileSync(path.join(src, 'meshes', 'virtual_a.nif'), 'mesh');
+        fs.writeFileSync(path.join(src, 'VirtualPlugin.esp'), Buffer.concat([Buffer.from('TES4'), Buffer.alloc(20)]));
+        execFileSync(require('7zip-bin').path7za, ['a', '-tzip', path.join(fake, 'mymod.zip'), path.join(fake, '_src', 'MyMod')]);
+        const inst1 = await mods.installFile('fallout4', path.join(fake, 'mymod.zip'), {});
+        log('vfs install', inst1.mod?.name);
+        await vfs.ensureUsvfs();
+        log('vfs mode', mods.setDeployMode('fallout4', 'virtual'), 'deploy', JSON.stringify(await mods.deploy('fallout4')));
+        const g = mods.game('fallout4');
+        log('vfs load order sees', plugins.scan(g).plugins.map((p) => p.name));
+        fs.writeFileSync(path.join(mods.profileDir('fallout4'), 'plugins.txt'), '*VirtualPlugin.esp\r\n');
+        const out = path.join(fake, 'seen.txt');
+        const realPlugins = path.join(GAMES.fallout4.pluginsDir(), 'plugins.txt');
+        const before = fs.existsSync(realPlugins) ? fs.readFileSync(realPlugins, 'utf8') : '';
+        const t0 = Date.now();
+        await vfs.launch('fallout4', { exe: path.join(fake, 'Fallout4.exe'), args: `/c dir /b /s "${path.join(fake, 'Data')}" > "${out}" & type "${realPlugins}" >> "${out}" & echo made> "${path.join(fake, 'Data', 'GameCreated.txt')}"`, wait: true, timeoutMs: 120000 });
+        const seen = fs.readFileSync(out, 'utf8');
+        log('vfs launch', `${Date.now() - t0}ms`, 'sees mesh:', /virtual_a\.nif/.test(seen), 'sees plugin:', /VirtualPlugin\.esp/.test(seen), 'profile plugins.txt served:', seen.includes('*VirtualPlugin.esp'));
+        log('vfs game folder clean:', !fs.existsSync(path.join(fake, 'Data', 'meshes')) && !fs.existsSync(path.join(fake, 'Data', 'GameCreated.txt')), 'overwrite:', vfs.overwriteFiles('fallout4'), 'real plugins.txt unchanged:', (fs.existsSync(realPlugins) ? fs.readFileSync(realPlugins, 'utf8') : '') === before);
+        mods.createInstance('fallout4', 'Selftest Instance', false);
+        mods.switchInstance('fallout4', 'Selftest Instance');
+        log('instance switched:', mods.instances('fallout4').active, 'mods there:', Object.keys(mods.state('fallout4').mods).length, 'staging:', path.basename(mods.stagingDir('fallout4')));
+        mods.switchInstance('fallout4', savedActive);
+        mods.deleteInstance('fallout4', 'Selftest Instance');
+        log('instance back:', mods.instances('fallout4').active, 'list:', mods.instances('fallout4').list, 'mods:', Object.keys(mods.state('fallout4').mods).length);
+      } finally {
+        mods.switchInstance('fallout4', savedActive);
+        const cur = mods.state('fallout4');
+        Object.keys(cur).forEach((k) => delete cur[k]);
+        Object.assign(cur, saved);
+        mods.save('fallout4');
+        fs.rmSync(fake, { recursive: true, force: true });
+      }
+      throw new Error('done (vfs only)');
     }
     if (process.env.MODFORGE_ONLY_LOCALAI) {
       await localAiSelfTest(log);

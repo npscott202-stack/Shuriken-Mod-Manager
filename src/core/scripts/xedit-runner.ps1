@@ -8,7 +8,9 @@ param(
   [string[]]$XArgs = @(),
   [int]$TimeoutSec = 2700,
   [switch]$AutoSave,
-  [string]$ShotDir = ''
+  [string]$ShotDir = '',
+  [string]$VfsHelper = '',  # virtual mode: start xEdit through shuriken-vfs.exe with this config
+  [string]$VfsConfig = ''
 )
 
 Add-Type -ReferencedAssemblies System.Drawing @'
@@ -41,7 +43,21 @@ if ($ArgsB64) {
 }
 $argLine = ($XArgs | ForEach-Object { '"' + ($_ -replace '\\$', '\\') + '"' }) -join ' '
 Write-Output "EVENT args $argLine"
-$p = Start-Process -FilePath $Exe -ArgumentList $argLine -WorkingDirectory (Split-Path $Exe) -PassThru
+if ($VfsHelper) {
+  # The helper starts xEdit inside the virtual file system; find that xEdit process to watch it.
+  $t0 = Get-Date
+  Start-Process -FilePath $VfsHelper -ArgumentList ('"' + $VfsConfig + '"') -WindowStyle Hidden | Out-Null
+  $name = [IO.Path]::GetFileNameWithoutExtension($Exe)
+  $p = $null
+  foreach ($i in 1..120) {
+    $p = Get-Process -Name $name -ErrorAction SilentlyContinue | Where-Object { $_.StartTime -ge $t0.AddSeconds(-2) } | Select-Object -First 1
+    if ($p) { break }
+    Start-Sleep -Milliseconds 500
+  }
+  if (-not $p) { Write-Output 'EVENT error xEdit did not start inside the virtual file system'; exit 3 }
+} else {
+  $p = Start-Process -FilePath $Exe -ArgumentList $argLine -WorkingDirectory (Split-Path $Exe) -PassThru
+}
 Write-Output "EVENT started pid=$($p.Id)"
 $deadline = (Get-Date).AddSeconds($TimeoutSec)
 $seen = @{}

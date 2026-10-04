@@ -36,6 +36,11 @@ function save(name, value) {
   fs.renameSync(tmp, target);
 }
 
+function remove(name) {
+  cache.delete(name);
+  fs.rmSync(file(name), { force: true });
+}
+
 function update(name, fallback, fn) {
   const value = load(name, fallback);
   const result = fn(value);
@@ -76,4 +81,4 @@ function dataDir(...parts) {
   return p;
 }
 
-module.exports = { init, load, save, update, setSecret, getSecret, dataDir };
+module.exports = { init, load, save, remove, update, setSecret, getSecret, dataDir };

@@ -32,12 +32,224 @@ function defaults(gameId) {
   };
 }
 
+// ---------- instances (MO2-style: fully separate mod setups per game) ----------
+const DEFAULT_INSTANCE = 'Default';
+
+function instanceDb() {
+  return store.load('instances', {});
+}
+
+function instances(gameId) {
+  const db = instanceDb();
+  if (!db[gameId]) db[gameId] = { active: DEFAULT_INSTANCE, list: [DEFAULT_INSTANCE] };
+  return db[gameId];
+}
+
+function instanceSuffix(gameId, name = instances(gameId).active) {
+  return name === DEFAULT_INSTANCE ? '' : `~${slug(name)}`;
+}
+
 function state(gameId) {
-  return store.load(`game-${gameId}`, defaults(gameId));
+  return store.load(`game-${gameId}${instanceSuffix(gameId)}`, defaults(gameId));
 }
 
 function save(gameId) {
-  store.save(`game-${gameId}`, state(gameId));
+  store.save(`game-${gameId}${instanceSuffix(gameId)}`, state(gameId));
+}
+
+function createInstance(gameId, name, copyFrom) {
+  const inst = instances(gameId);
+  name = String(name || '').trim();
+  if (!name) throw new Error('Name the instance first.');
+  if (inst.list.some((x) => x.toLowerCase() === name.toLowerCase())) throw new Error('An instance with that name already exists.');
+  const cur = state(gameId);
+  const fresh = defaults(gameId);
+  // A new instance points at the same game folder and tools, but has its own mods and profiles.
+  Object.assign(fresh, { installDir: cur.installDir, mcVersion: cur.mcVersion, loader: cur.loader, tools: structuredClone(cur.tools || []), deployMode: cur.deployMode || 'hardlink' });
+  if (copyFrom) {
+    // Copy the mod list setup (not the files): mods are re-linked from the source instance's staging folder.
+    fresh.profiles = structuredClone(cur.profiles);
+    fresh.activeProfile = cur.activeProfile;
+  }
+  store.save(`game-${gameId}${instanceSuffix(gameId, name)}`, fresh);
+  inst.list.push(name);
+  store.save('instances', instanceDb());
+  if (copyFrom) {
+    // Copy staged mod folders so the two instances stay independent.
+    const fromDir = stagingDir(gameId);
+    const prevActive = inst.active;
+    inst.active = name;
+    const toDir = stagingDir(gameId);
+    for (const [id, mod] of Object.entries(cur.mods)) {
+      const src = path.join(fromDir, id);
+      if (fs.existsSync(src)) fs.cpSync(src, path.join(toDir, id), { recursive: true });
+      state(gameId).mods[id] = structuredClone(mod);
+    }
+    save(gameId);
+    inst.active = prevActive;
+    store.save('instances', instanceDb());
+  }
+  return instances(gameId);
+}
+
+function switchInstance(gameId, name) {
+  const inst = instances(gameId);
+  if (!inst.list.includes(name)) throw new Error('No such instance.');
+  if (inst.active === name) return inst;
+  // Hardlinked files from the old instance must leave the game folder first.
+  const cur = state(gameId);
+  if ((cur.deployMode || 'hardlink') === 'hardlink' && Object.keys(cur.deployment.files || {}).length) purge(gameId);
+  inst.active = name;
+  store.save('instances', instanceDb());
+  const next = state(gameId);
+  if ((next.deployMode || 'hardlink') === 'hardlink') next.deployment.dirty = true;
+  save(gameId);
+  return inst;
+}
+
+function deleteInstance(gameId, name) {
+  const inst = instances(gameId);
+  if (name === DEFAULT_INSTANCE) throw new Error('The Default instance cannot be deleted.');
+  if (!inst.list.includes(name)) throw new Error('No such instance.');
+  if (inst.active === name) switchInstance(gameId, DEFAULT_INSTANCE);
+  const prev = inst.active;
+  inst.active = name;
+  const dir = stagingDir(gameId);
+  const st = state(gameId);
+  if (Object.keys(st.deployment.files || {}).length) purge(gameId);
+  inst.active = prev;
+  fs.rmSync(dir, { recursive: true, force: true });
+  store.remove(`game-${gameId}${instanceSuffix(gameId, name)}`);
+  inst.list = inst.list.filter((x) => x !== name);
+  store.save('instances', instanceDb());
+  return inst;
+}
+
+// ---------- deployment mode + per-profile folders ----------
+function deployMode(gameId) {
+  const g = GAMES[gameId];
+  if (g.kind === 'minecraft') return 'hardlink';
+  return state(gameId).deployMode || 'hardlink';
+}
+
+function safeFolder(name) {
+  return String(name).replace(/[<>:"/\\|?*]/g, '_').trim() || 'Profile';
+}
+
+function profileDir(gameId, name = state(gameId).activeProfile) {
+  const dir = path.join(stagingDir(gameId), '_profiles', safeFolder(name));
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+function overwriteDir(gameId) {
+  const dir = path.join(stagingDir(gameId), '_overwrite');
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+// Seeds a profile's own plugins.txt / loadorder.txt from the real ones the first time.
+function seedProfilePlugins(gameId) {
+  const def = GAMES[gameId];
+  if (def.kind !== 'bethesda') return;
+  const dir = profileDir(gameId);
+  for (const f of ['plugins.txt', 'loadorder.txt']) {
+    const real = path.join(def.pluginsDir(), f);
+    const mine = path.join(dir, f);
+    if (!fs.existsSync(mine) && fs.existsSync(real)) fs.copyFileSync(real, mine);
+  }
+}
+
+function setDeployMode(gameId, mode) {
+  if (!['hardlink', 'virtual'].includes(mode)) throw new Error('Unknown mode');
+  if (GAMES[gameId].kind === 'minecraft' && mode === 'virtual') throw new Error('Minecraft uses hardlink mode (use instances in your launcher instead).');
+  const s = state(gameId);
+  const from = s.deployMode || 'hardlink';
+  if (from === mode) return mode;
+  if (mode === 'virtual') {
+    // Clean the game folder: in virtual mode nothing is ever written there.
+    if (Object.keys(s.deployment.files || {}).length) purge(gameId);
+    seedProfilePlugins(gameId);
+    s.deployMode = 'virtual';
+    s.deployment.dirty = true;
+  } else {
+    s.deployMode = 'hardlink';
+    s.deployment.dirty = true;
+  }
+  save(gameId);
+  return mode;
+}
+
+function setProfileOptions(gameId, name, opts) {
+  const s = state(gameId);
+  const p = s.profiles[name];
+  if (!p) throw new Error('No such profile');
+  const def = GAMES[gameId];
+  const dir = profileDir(gameId, name);
+  if ('localInis' in opts) {
+    p.localInis = !!opts.localInis;
+    if (p.localInis && def.kind === 'bethesda') {
+      // Start the profile's INIs as copies of the current ones.
+      const iniDir = path.join(dir, 'ini');
+      fs.mkdirSync(iniDir, { recursive: true });
+      for (const f of def.iniFiles || []) {
+        const src = path.join(def.myGames(), f);
+        if (fs.existsSync(src) && !fs.existsSync(path.join(iniDir, f))) fs.copyFileSync(src, path.join(iniDir, f));
+      }
+    }
+  }
+  if ('localSaves' in opts) {
+    p.localSaves = !!opts.localSaves;
+    if (p.localSaves) fs.mkdirSync(path.join(dir, 'saves'), { recursive: true });
+  }
+  save(gameId);
+  return p;
+}
+
+function renameProfile(gameId, from, to) {
+  const s = state(gameId);
+  to = String(to || '').trim();
+  if (!to) throw new Error('Name the profile first.');
+  if (!s.profiles[from]) throw new Error('No such profile');
+  if (s.profiles[to]) throw new Error('A profile with that name already exists.');
+  const oldDir = path.join(stagingDir(gameId), '_profiles', safeFolder(from));
+  s.profiles[to] = s.profiles[from];
+  delete s.profiles[from];
+  if (s.activeProfile === from) s.activeProfile = to;
+  save(gameId);
+  if (fs.existsSync(oldDir)) fs.renameSync(oldDir, path.join(stagingDir(gameId), '_profiles', safeFolder(to)));
+}
+
+// Plugin files the game would see in virtual mode: real Data plus every enabled mod (later wins).
+function virtualPluginFiles(gameId) {
+  const g = GAMES[gameId];
+  const s = state(gameId);
+  const p = profile(gameId);
+  const map = new Map();
+  const data = path.join(s.installDir, 'Data');
+  try {
+    for (const f of fs.readdirSync(data)) if (plugins.PLUGIN_RE.test(f)) map.set(f.toLowerCase(), { name: f, path: path.join(data, f) });
+  } catch {
+    // no Data folder
+  }
+  for (const id of p.order) {
+    const mod = s.mods[id];
+    if (!p.enabled[id] || !mod || mod.type !== 'data') continue;
+    const dir = modDir(gameId, id);
+    try {
+      for (const f of fs.readdirSync(dir)) if (plugins.PLUGIN_RE.test(f)) map.set(f.toLowerCase(), { name: f, path: path.join(dir, f) });
+    } catch {
+      // empty mod
+    }
+  }
+  const ow = path.join(stagingDir(gameId), '_overwrite');
+  try {
+    for (const f of fs.readdirSync(ow)) if (plugins.PLUGIN_RE.test(f)) map.set(f.toLowerCase(), { name: f, path: path.join(ow, f) });
+  } catch {
+    // no overwrite yet
+  }
+  void g;
+  return map;
 }
 
 // Game definition merged with this user's paths.
@@ -45,19 +257,25 @@ function game(gameId) {
   const def = GAMES[gameId];
   if (!def) throw new Error(`Unknown game ${gameId}`);
   const s = state(gameId);
-  const g = { ...def, installDir: s.installDir, stagingDir: stagingDir(gameId) };
+  const g = { ...def, installDir: s.installDir, stagingDir: stagingDir(gameId), deployMode: deployMode(gameId), instance: instances(gameId).active };
   if (s.pluginsDirOverride) g.pluginsDir = () => s.pluginsDirOverride;
+  else if (g.deployMode === 'virtual' && def.kind === 'bethesda' && s.installDir) {
+    g.realPluginsDir = def.pluginsDir;
+    g.pluginsDir = () => profileDir(gameId);
+    g.pluginFiles = () => virtualPluginFiles(gameId);
+  }
   return g;
 }
 
 function stagingDir(gameId) {
   const s = state(gameId);
   if (s.stagingDir) return s.stagingDir;
-  if (!s.installDir) return store.dataDir('staging', gameId);
+  const name = `${gameId}${instanceSuffix(gameId)}`;
+  if (!s.installDir) return store.dataDir('staging', name);
   // Hardlinks only work on the same drive as the game, so stage there when the game is elsewhere.
   const gameRoot = path.parse(s.installDir).root.toLowerCase();
   const userRoot = path.parse(store.dataDir()).root.toLowerCase();
-  const dir = gameRoot === userRoot ? store.dataDir('staging', gameId) : path.join(gameRoot, 'ModForge', 'Staging', gameId);
+  const dir = gameRoot === userRoot ? store.dataDir('staging', name) : path.join(gameRoot, 'ModForge', 'Staging', name);
   fs.mkdirSync(dir, { recursive: true });
   return dir;
 }
@@ -121,11 +339,22 @@ function targetRoot(g, mod) {
 }
 
 // Map of absolute target path -> { mod, source } for the active profile (later mods win).
+// Files that must be real even in virtual mode: usvfs can't start a program that only exists
+// virtually, and DLL proxies (ENB/ReShade/loaders) are loaded before hooks are in place.
+function needsRealFile(g, mod, rel) {
+  if (mod.type === 'root') return true;
+  if (g.kind === 'generic' && library.expand(g.base, g.installDir) === g.installDir) {
+    return !/[\\/]/.test(rel) && /\.(exe|dll|asi|ini)$/i.test(rel);
+  }
+  return false;
+}
+
 function desiredFiles(gameId) {
   const g = game(gameId);
   const s = state(gameId);
   const p = profile(gameId);
   const map = new Map();
+  const virtual = g.deployMode === 'virtual';
   for (const id of p.order) {
     if (!p.enabled[id] || !s.mods[id]) continue;
     const mod = s.mods[id];
@@ -133,6 +362,7 @@ function desiredFiles(gameId) {
     const src = modDir(gameId, id);
     for (const rel of walk(src)) {
       if (/^fomod[\\/]/i.test(rel) || /^(readme|changelog)[^\\/]*\.(txt|md|pdf)$/i.test(rel)) continue;
+      if (virtual && !needsRealFile(g, mod, rel)) continue;
       map.set(path.join(root, rel).toLowerCase(), { target: path.join(root, rel), source: path.join(src, rel), mod: id });
     }
   }
@@ -473,8 +703,9 @@ function switchProfile(gameId, name) {
   if (!s.profiles[name]) throw new Error('No such profile');
   if (g.kind === 'bethesda' && g.installDir) profile(gameId).plugins = plugins.readPluginsTxt(g);
   s.activeProfile = name;
-  s.deployment.dirty = true;
+  s.deployment.dirty = deployMode(gameId) !== 'virtual';
   save(gameId);
+  if (deployMode(gameId) === 'virtual') seedProfilePlugins(gameId);
 }
 
 function deleteProfile(gameId, name) {
@@ -591,6 +822,10 @@ async function deployUnlocked(gameId, onProgress) {
 
   // 3. plugin load order for this profile
   if (g.kind === 'bethesda') syncPlugins(gameId);
+  if (g.deployMode === 'virtual') {
+    // Everything else is served virtually at launch.
+    return { virtual: true, linked, copied, removed, rootFiles: Object.keys(next).length, total: Object.values(profile(gameId).enabled).filter(Boolean).length };
+  }
   return { linked, copied, removed, total: Object.keys(next).length };
 }
 
@@ -669,4 +904,6 @@ module.exports = {
   state, save, game, stagingDir, setGamePath, listMods, installFile, fomodVisibleStep, fomodComplete, fomodCancel,
   removeMod, setEnabled, setOrder, renameMod, profiles, createProfile, switchProfile, deleteProfile, deploy, purge,
   savePluginOrder, computeConflicts, findFile, modDir, walk, profile, registerMod, slug,
+  instances, createInstance, switchInstance, deleteInstance, deployMode, setDeployMode, profileDir, overwriteDir,
+  setProfileOptions, renameProfile, targetRoot, syncPlugins, DEFAULT_INSTANCE,
 };
