@@ -1,7 +1,7 @@
 {
   "name": "shuriken",
   "productName": "Shuriken",
-  "version": "0.6.2",
+  "version": "0.6.3",
   "description": "Shuriken: AI-powered multi-game mod manager, modpack assembler and mod workshop.",
   "main": "main.js",
   "author": "Shuriken",

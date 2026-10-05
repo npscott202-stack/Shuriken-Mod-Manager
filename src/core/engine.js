@@ -154,7 +154,7 @@ async function installModel(id, onProgress, signal) {
 }
 
 // Adds model files the user downloaded by hand (from the model's Hugging Face page).
-function importModelFiles(paths) {
+async function importModelFiles(paths) {
   const known = new Map();
   for (const [id, m] of Object.entries(MODELS)) for (const f of m.files) known.set(f.name.toLowerCase(), { id, name: f.name });
   const added = [];
@@ -163,7 +163,11 @@ function importModelFiles(paths) {
     const hit = known.get(path.basename(p).toLowerCase());
     if (!hit) { unknown.push(path.basename(p)); continue; }
     const dest = path.join(modelsDir(), hit.name);
-    if (path.resolve(p).toLowerCase() !== path.resolve(dest).toLowerCase()) fs.copyFileSync(p, dest);
+    if (path.resolve(p).toLowerCase() !== path.resolve(dest).toLowerCase()) {
+      // Copy to a temp name first so a half-copied file never looks like an installed model.
+      await fs.promises.copyFile(p, `${dest}.part`);
+      await fs.promises.rename(`${dest}.part`, dest);
+    }
     added.push(hit);
   }
   const complete = [...new Set(added.map((a) => a.id))].filter((id) => modelInstalled(id));
@@ -264,10 +268,35 @@ async function startUnlocked(modelId) {
   if (!modelInstalled(modelId)) throw new Error('The AI model is not downloaded yet. Open Settings → AI assistant and click "Set up Shuriken AI".');
   const { model, mmproj } = modelPaths(modelId);
   const device = pickDevice(await listDevices(eng.exe));
+  // Laptop GPUs often report more free memory than they can hand out in one piece. If loading
+  // runs out of GPU memory, try again lighter: screenshot reader on the CPU and a smaller
+  // context, then part of the model on the CPU, then CPU only. The last mode that worked is reused.
+  const modes = [[], ['--no-mmproj-offload', '-c', '8192', '--fit-target', '768'], ['--no-mmproj-offload', '-c', '8192', '-ngl', '20'], ['cpu']];
+  let lastError = null;
+  for (let i = lightMode[modelId] || 0; i < modes.length; i++) {
+    try {
+      const s = await launch(eng, model, mmproj, modelId, device, modes[i]);
+      lightMode[modelId] = i;
+      s.mode = ['full GPU', 'reduced GPU', 'partly on CPU', 'CPU only'][i];
+      return s;
+    } catch (e) {
+      lastError = e;
+      if (!/OutOfDeviceMemory|failed to allocate|DeviceLost|out of memory/i.test(e.message)) throw e;
+    }
+  }
+  throw lastError;
+}
+
+const lightMode = {}; // modelId -> index of the lightest mode needed so far
+
+async function launch(eng, model, mmproj, modelId, device, extra) {
   const port = await freePort();
-  const args = ['-m', model, '--mmproj', mmproj, '--host', '127.0.0.1', '--port', String(port), '-c', String(CONTEXT),
-    '--jinja', '-fa', 'auto', '-ctk', 'q8_0', '-ctv', 'q8_0', '--no-webui', '-np', '1', '--fit', 'on'];
-  if (device) args.push('--device', device.id);
+  const cpu = extra[0] === 'cpu';
+  const ctx = extra.includes('-c') ? [] : ['-c', String(CONTEXT)];
+  const args = ['-m', model, '--mmproj', mmproj, '--host', '127.0.0.1', '--port', String(port), ...ctx,
+    '--jinja', '-fa', 'auto', '-ctk', 'q8_0', '-ctv', 'q8_0', '--no-webui', '-np', '1',
+    ...(cpu ? ['-ngl', '0', '--no-mmproj-offload', '-c', '8192'] : extra.includes('-ngl') ? extra : ['--fit', 'on', ...extra])];
+  if (device && !cpu) args.push('--device', device.id);
   const logFile = path.join(store.dataDir('logs'), 'engine.log');
   const log = fs.createWriteStream(logFile, { flags: 'w' });
   const proc = spawn(eng.exe, args, { cwd: path.dirname(eng.exe), windowsHide: true });
@@ -307,6 +336,7 @@ async function status(modelId = DEFAULT_MODEL) {
     models: Object.entries(MODELS).map(([id, m]) => ({ id, label: m.label, about: m.about, page: m.page, files: m.files.map((f) => f.name), sizeGB: m.sizeGB, installed: modelInstalled(id), builtIn: builtIn(id), recommended: device ? device.totalMB / 1024 >= m.minVramGB : id === 'qwen3-vl-4b' })),
     ready: !!eng && modelInstalled(modelId),
     running: !!server && server.proc.exitCode === null,
+    gpuMode: server?.mode || null,
     device: device ? `${device.name} (${Math.round(device.totalMB / 1024)} GB)` : 'CPU (no supported GPU found)',
     recommendedModel: !device ? 'qwen3-vl-2b' : device.totalMB / 1024 >= MODELS['qwen3-vl-8b'].minVramGB ? 'qwen3-vl-8b' : device.totalMB / 1024 >= MODELS['qwen3-vl-4b'].minVramGB ? 'qwen3-vl-4b' : 'qwen3-vl-2b',
   };
@@ -346,18 +376,53 @@ async function setup(modelId, onProgress) {
 // ---------- chat (OpenAI-compatible streaming) ----------
 // Streams one assistant turn. onEvent receives { type: 'text' | 'thinking', delta }. Returns
 // { content, tool_calls } where tool_calls are OpenAI-style.
+// Small models can get stuck repeating the same sentence. True when the newest text is a chunk
+// that already appeared several times in a row.
+function looping(text) {
+  if (text.length < 240) return false;
+  const tail = text.slice(-60);
+  let count = 0;
+  let from = text.length - 60;
+  const window = Math.max(0, text.length - 1500);
+  while ((from = text.lastIndexOf(tail, from - 1)) >= window) count++;
+  return count >= 3;
+}
+
+// A graphics driver reset kills the running model. Restart it in a lighter mode next time.
+function gpuReset(e, modelId) {
+  if (!/DeviceLost|OutOfDeviceMemory|vk::/i.test(e.message)) return e;
+  stop();
+  lightMode[modelId] = Math.min(3, (lightMode[modelId] || 0) + 1);
+  return new Error('The graphics driver reset while the AI was answering (usually the GPU ran out of memory, e.g. a game is running). Shuriken restarted the AI in a lighter mode: send your message again.');
+}
+
+// Qwen3-VL's recommended sampling for instruct models, with a presence penalty to discourage
+// repetition (kept moderate so tool-call JSON and code still come out right).
+const SAMPLING = { temperature: 0.7, top_p: 0.8, top_k: 20, presence_penalty: 1.0, repeat_penalty: 1.05 };
+
 async function chatTurn({ modelId, messages, tools, signal }, onEvent) {
   const s = await start(modelId);
-  const res = await fetch(`http://127.0.0.1:${s.port}/v1/chat/completions`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ messages, tools, stream: true, temperature: 0.5, top_p: 0.9, max_tokens: 4096 }),
-    signal,
-  });
+  const local = new AbortController();
+  const stopLocal = () => local.abort();
+  signal?.addEventListener('abort', stopLocal);
+  let res;
+  try {
+    res = await fetch(`http://127.0.0.1:${s.port}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages, tools, stream: true, ...SAMPLING, max_tokens: 4096 }),
+      signal: local.signal,
+    });
+  } catch (e) {
+    signal?.removeEventListener('abort', stopLocal);
+    throw e;
+  }
   if (!res.ok) throw new Error(`AI engine error ${res.status}: ${(await res.text()).slice(0, 300)}`);
   const msg = { role: 'assistant', content: '', tool_calls: [] };
   let buf = '';
   const decoder = new TextDecoder();
+  let looped = false;
+  try {
   for await (const chunk of res.body) {
     buf += decoder.decode(chunk, { stream: true });
     let nl;
@@ -373,12 +438,17 @@ async function chatTurn({ modelId, messages, tools, signal }, onEvent) {
       } catch {
         continue;
       }
-      if (ev.error) throw new Error(ev.error.message || String(ev.error));
+      if (ev.error) throw gpuReset(new Error(ev.error.message || String(ev.error)), modelId);
       const d = ev.choices?.[0]?.delta || {};
       if (d.reasoning_content) onEvent({ type: 'thinking', delta: d.reasoning_content });
       if (d.content) {
         msg.content += d.content;
         onEvent({ type: 'text', delta: d.content });
+        if (looping(msg.content)) {
+          looped = true;
+          local.abort();
+          break;
+        }
       }
       for (const tc of d.tool_calls || []) {
         const i = tc.index ?? msg.tool_calls.length;
@@ -388,6 +458,16 @@ async function chatTurn({ modelId, messages, tools, signal }, onEvent) {
         if (tc.function?.arguments) cur.function.arguments += tc.function.arguments;
       }
     }
+    if (looped) break;
+  }
+  } catch (e) {
+    if (!looped) throw gpuReset(e, modelId);
+  } finally {
+    signal?.removeEventListener('abort', stopLocal);
+  }
+  if (looped) {
+    onEvent({ type: 'text', delta: '\n\n_(stopped: the answer started repeating itself)_' });
+    msg.tool_calls = [];
   }
   msg.tool_calls = msg.tool_calls.filter(Boolean);
   if (!msg.tool_calls.length) delete msg.tool_calls;

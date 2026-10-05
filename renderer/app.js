@@ -1916,7 +1916,7 @@ async function pageSettings() {
         h('div', { class: 'row wrap', style: { marginBottom: '10px' } },
           h('span', { class: `chip ${st.engineInstalled ? 'ok' : 'warn'}` }, st.engineInstalled ? `Engine ${st.build}` : 'Engine not installed'),
           h('span', { class: `chip ${chosen.installed ? 'ok' : 'warn'}` }, chosen.installed ? 'Model ready' : 'Model not downloaded'),
-          h('span', { class: `chip ${st.running ? 'ok' : ''}` }, st.running ? 'Running' : 'Idle'),
+          h('span', { class: `chip ${st.running ? 'ok' : ''}` }, st.running ? `Running${st.gpuMode ? ` · ${st.gpuMode}` : ''}` : 'Idle'),
           h('span', { class: 'chip' }, `GPU: ${st.device}`)),
         h('div', { style: { marginBottom: '10px' } }, modelRows),
         st.ready ? null : h('div', { class: 'issue warning' }, h('span', { class: 'sev' }), h('div', { class: 'txt small' }, 'The AI is not set up yet. Click Download next to a model (the engine comes with it). The 2B model is the smallest; pick the one marked "best for your GPU" for better answers.')),

@@ -772,6 +772,7 @@ async function sendLocal({ chat, gameId, text, images }, emit, approve, cfg) {
   const tools = localTools(g);
   const ctx = { onChange: () => emit({ type: 'state-changed' }), emit };
 
+  const seen = new Map(); // tool + arguments -> times called this request
   for (let turn = 0; turn < 40; turn++) {
     if (chat.abort?.signal.aborted) break;
     trimLocalHistory(chat.local);
@@ -785,6 +786,13 @@ async function sendLocal({ chat, gameId, text, images }, emit, approve, cfg) {
         continue;
       }
       const name = call.function?.name;
+      // Small models sometimes call the same tool with the same input again and again.
+      const sig = `${name} ${call.function?.arguments || ''}`;
+      seen.set(sig, (seen.get(sig) || 0) + 1);
+      if (seen.get(sig) > 2 && !/^playtest_(screenshot|act|status)$/.test(name)) {
+        chat.local.push({ role: 'tool', tool_call_id: call.id, content: 'You already ran this exact call and got the result above. Do not repeat it: use that result, try a different tool or input, or answer the user now.' });
+        continue;
+      }
       const r = await executeTool({ gameId, name, input: call.function?.arguments, id: call.id, cfg, emit, approve, ctx, maxChars: 6000 });
       chat.local.push({ role: 'tool', tool_call_id: call.id, content: r.isError ? `ERROR: ${r.content}` : r.content });
       if (r.image) shots.push(r.image);

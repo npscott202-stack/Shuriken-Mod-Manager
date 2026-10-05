@@ -675,7 +675,8 @@ function registerIpc() {
   handle('engine:import', async () => {
     const r = await dialog.showOpenDialog(win, { title: 'Add downloaded AI model files (.gguf)', properties: ['openFile', 'multiSelections'], filters: [{ name: 'AI model files', extensions: ['gguf'] }] });
     if (r.canceled || !r.filePaths.length) return null;
-    const out = engine.importModelFiles(r.filePaths);
+    send('toast', { kind: 'info', text: 'Copying the model files… (large files take a minute)' });
+    const out = await engine.importModelFiles(r.filePaths);
     if (out.complete.length) {
       const s = settings();
       s.localModel = out.complete[0];
