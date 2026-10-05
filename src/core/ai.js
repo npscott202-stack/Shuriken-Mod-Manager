@@ -22,6 +22,7 @@ const saves = require('./saves');
 const precombines = require('./precombines');
 const playtest = require('./playtest');
 const toolstore = require('./toolstore');
+const research = require('./research');
 
 // Does a tool apply to this game? games: undefined (all), a kind, a game id, or 'thunderstore'.
 function toolFits(t, g) {
@@ -64,7 +65,8 @@ How to work:
   - Minecraft: datapacks (mc-datapack: recipes, loot tables, advancements, functions, worldgen; needs pack.mcmeta with the right pack_format) installed into a world with workshop_package; resource packs (mc-resourcepack); KubeJS scripts or config overrides (mc-config, files relative to the instance folder such as kubejs/server_scripts/x.js or config/x.toml); real Java mods (fabric-mod: starts from the official Fabric example mod for the chosen version — rename the package, mod id and fabric.mod.json, then workshop_package builds it with Gradle and installs the jar).
   - Write complete files, not fragments. Build after writing, read the compiler/build output, fix errors and rebuild until it succeeds.
 - Nexus Mods: free accounts cannot be downloaded from automatically. Give the user the mod page link and tell them to click "Mod Manager Download"; Shuriken will install it.
-- Use web_search for known incompatibilities, version requirements or error strings you are unsure about, and mention where the information came from.
+- Research before answering anything you are not sure of: web_search / search_web for error strings, incompatibilities and fixes (try site:reddit.com or forums.nexusmods.com for player reports), read_web_page to read guides and threads, search_nexus for mods (Nexus pages themselves cannot be read: send the user the link), search_wiki for game facts and locations, search_github for tools. Cross-check important claims in two sources and say where information came from.
+- Complex jobs (several mods, a modpack, a multi-step fix, a playtest): call update_plan first with concrete steps, keep it updated, and check your work at the end (re-run the check that found the problem).
 - Never tell the user to delete their save, reinstall the game, or verify game files unless the evidence actually points there, and say what will be lost.
 - Keep answers focused: short summary first, then the steps or fixes. Use markdown lists for steps.`;
 
@@ -136,6 +138,14 @@ TOOL_DEFS.push(
   { name: 'analyze_precombines', write: false, games: 'fo4', description: 'Fallout 4: scans the whole active load order for broken precombines/previs: mods that edit precombined references (cell precombines turned off = FPS loss, flicker), cells whose precombine data a mod removed, previs patches overridden by older data, whether PRP is installed, and safe load-order fixes.', input_schema: obj({}) },
   { name: 'fix_precombine_order', write: true, games: 'fo4', description: 'Fallout 4: applies the load-order suggestions from analyze_precombines (moves previs patches below the plugins that override them).', input_schema: obj({}) },
 
+  // ---- research ----
+  { name: 'search_web', write: false, description: 'Searches the web (forums, Reddit, Steam guides, mod authors\' docs, GitHub, wikis). Optional site to restrict it, e.g. "reddit.com", "steamcommunity.com", "forums.nexusmods.com". Returns titles, links and snippets; open the useful ones with read_web_page.', input_schema: obj({ query: S, site: { type: 'string' } }, ['query']) },
+  { name: 'read_web_page', write: false, description: 'Reads a web page as text (guides, forum threads, GitHub READMEs, documentation). Optional find jumps to the part mentioning that text on long pages. Nexus Mods pages cannot be read (the site forbids it): use search_nexus and give the user the link.', input_schema: obj({ url: S, find: { type: 'string' } }, ['url']) },
+  { name: 'search_nexus', write: false, description: 'Searches Nexus Mods for this game by mod name: name, short summary, version, author, endorsements, downloads, last update and link (most endorsed first).', input_schema: obj({ query: S }) },
+  { name: 'search_wiki', write: false, description: 'Searches the game\'s wiki (UESP / Fandom / Minecraft Wiki ...) for locations, items, quests, NPCs and game mechanics; set page to a title from the results to read that page.', input_schema: obj({ query: S, page: { type: 'string' } }, ['query']) },
+  { name: 'search_github', write: false, description: 'Searches GitHub repositories (modding tools, script extenders, frameworks, source code) by stars.', input_schema: obj({ query: S }) },
+  { name: 'update_plan', write: false, description: 'For multi-step jobs: write or update your step-by-step plan. The user sees it as a checklist. Mark steps done as you finish them; add steps when you learn something new.', input_schema: obj({ steps: { type: 'array', items: { type: 'object', properties: { text: S, status: { type: 'string', enum: ['todo', 'doing', 'done', 'skipped'] } }, required: ['text', 'status'] } } }) },
+
   // ---- playtest (the AI plays the game) ----
   { name: 'playtest_start', write: true, description: 'Playtest mode: launches the game with the current mods (or attaches if it is already running), optionally loads a save (Bethesda: save file name) or travels to a location (Bethesda: cell editor ID for coc, see playtest_find_location), and returns a screenshot. Use it when the user wants you to go look at a problem in game.', input_schema: obj({ save: { type: 'string', description: 'Save file name, e.g. from list_saves (Bethesda)' }, location: { type: 'string', description: 'Cell editor ID to coc to (Bethesda)' }, wait_seconds: { type: 'integer', description: 'Seconds to wait for the main menu after launch (default 45)' } }, []) },
   { name: 'playtest_screenshot', write: false, description: 'Playtest: captures the game window so you can see what is on screen right now.', input_schema: obj({}, []) },
@@ -173,7 +183,7 @@ const WRITE_TOOLS = new Set(TOOL_DEFS.filter((t) => t.write).map((t) => t.name))
 function apiTools(g) {
   return [
     ...TOOL_DEFS.filter((t) => toolFits(t, g)).map(({ write, games, ...t }) => t),
-    { type: 'web_search_20260209', name: 'web_search', max_uses: 5 },
+    { type: 'web_search_20260209', name: 'web_search', max_uses: 10 },
   ];
 }
 
@@ -433,6 +443,19 @@ async function runTool(gameId, name, input, ctx) {
     }
     case 'generate_previs':
       return beth.generatePrevis(gameId, path.basename(input.plugin));
+    case 'search_web':
+      return research.webSearch(input.query, { site: input.site });
+    case 'read_web_page':
+      return research.readPage(input.url, { find: input.find });
+    case 'search_nexus':
+      return research.searchNexus(gameId, input.query);
+    case 'search_wiki':
+      return research.searchWiki(gameId, input.query, { page: input.page });
+    case 'search_github':
+      return research.searchGithub(input.query);
+    case 'update_plan':
+      ctx.emit?.({ type: 'plan', steps: (input.steps || []).slice(0, 20) });
+      return 'Plan shown to the user. Work through it step by step and update it as you go.';
     case 'playtest_start':
       return playtest.start(gameId, { save: input.save, location: input.location, waitSeconds: input.wait_seconds || 45 });
     case 'playtest_screenshot':
@@ -692,6 +715,8 @@ You help with Bethesda games (Skyrim, Fallout, Oblivion, Starfield), Minecraft a
 
 Rules:
 - Use the tools to look at the real setup (get_setup, list_crash_logs, read_file, get_load_order, health_check, search_files, minecraft_scan) before answering. Never invent mod names, file paths or log contents.
+- You do not know modding details by heart and your memory is often wrong. Before explaining a mod, an error, a game mechanic or a fix, LOOK IT UP: search_web (add site reddit.com or forums.nexusmods.com for player reports), then read_web_page on the best result; search_nexus to find mods; search_wiki for game facts and places. Base your answer on what you read and name the source.
+- For a job with several steps, first call update_plan with short steps, then work through them, updating the plan. Finish by checking the result.
 - Work step by step: call one or two tools, read the results, then decide the next step.
 - For crashes: list_crash_logs, read the newest log, find the plugin/mod/file named near the error, match it to a mod with search_files, then explain and fix.
 - When you change something (enable/disable mods, plugin order, INI values, files, deploy) use the matching tool; the user approves each change. Make the smallest fix first, then tell the user to test.
@@ -709,7 +734,7 @@ const LOCAL_TOOLSET = new Set([
   'check_nif_textures', 'workshop_create', 'workshop_write_file', 'workshop_list_files', 'workshop_package', 'list_worlds',
   'search_thunderstore', 'install_thunderstore', 'list_saves', 'analyze_save', 'clean_save', 'analyze_precombines',
   'playtest_start', 'playtest_screenshot', 'playtest_console', 'playtest_act', 'playtest_inspect', 'playtest_find_location', 'playtest_stop',
-  'request_tool', 'install_tool',
+  'request_tool', 'install_tool', 'search_web', 'read_web_page', 'search_nexus', 'search_wiki', 'search_github', 'update_plan',
 ]);
 
 function slimSchema(schema) {
@@ -730,7 +755,7 @@ function localTools(g) {
 }
 
 // Keeps the conversation inside the local model's context window.
-function trimLocalHistory(messages, budget = 24000) {
+function trimLocalHistory(messages, budget = 32000) {
   const len = (m) => (typeof m.content === 'string' ? m.content.length : (m.content || []).reduce((n, p) => n + (p.text?.length || 2000), 0));
   let size = messages.reduce((n, m) => n + len(m), 0);
   for (let i = 1; i < messages.length - 4 && size > budget; i++) {
@@ -773,10 +798,18 @@ async function sendLocal({ chat, gameId, text, images }, emit, approve, cfg) {
   const ctx = { onChange: () => emit({ type: 'state-changed' }), emit };
 
   const seen = new Map(); // tool + arguments -> times called this request
-  for (let turn = 0; turn < 40; turn++) {
+  for (let turn = 0; turn < 60; turn++) {
     if (chat.abort?.signal.aborted) break;
     trimLocalHistory(chat.local);
-    const msg = await engine.chatTurn({ modelId, messages: chat.local, tools, signal: chat.abort?.signal }, emit);
+    let msg;
+    try {
+      msg = await engine.chatTurn({ modelId, messages: chat.local, tools, signal: chat.abort?.signal }, emit);
+    } catch (e) {
+      // The engine rejects the whole conversation if any earlier tool call is broken JSON.
+      if (!/parse tool call arguments/i.test(e.message) || !repairToolHistory(chat.local, true)) throw e;
+      msg = await engine.chatTurn({ modelId, messages: chat.local, tools, signal: chat.abort?.signal }, emit);
+    }
+    for (const call of msg.tool_calls || []) call.function.arguments = fixArgs(call.function.arguments);
     chat.local.push({ role: 'assistant', content: msg.content || '', ...(msg.tool_calls ? { tool_calls: msg.tool_calls } : {}) });
     if (!msg.tool_calls?.length) break;
     const shots = [];
@@ -793,7 +826,7 @@ async function sendLocal({ chat, gameId, text, images }, emit, approve, cfg) {
         chat.local.push({ role: 'tool', tool_call_id: call.id, content: 'You already ran this exact call and got the result above. Do not repeat it: use that result, try a different tool or input, or answer the user now.' });
         continue;
       }
-      const r = await executeTool({ gameId, name, input: call.function?.arguments, id: call.id, cfg, emit, approve, ctx, maxChars: 6000 });
+      const r = await executeTool({ gameId, name, input: call.function?.arguments, id: call.id, cfg, emit, approve, ctx, maxChars: /^(read_web_page|search_wiki)$/.test(name) ? 9000 : 6000 });
       chat.local.push({ role: 'tool', tool_call_id: call.id, content: r.isError ? `ERROR: ${r.content}` : r.content });
       if (r.image) shots.push(r.image);
     }
@@ -812,6 +845,38 @@ async function sendLocal({ chat, gameId, text, images }, emit, approve, cfg) {
   emit({ type: 'done' });
 }
 
+
+// ---------- broken tool-call JSON from the local model ----------
+// Small models sometimes stop a tool call mid-string ({"path": "C:\Mods). Try to close it;
+// otherwise send {} so the tool reports missing parameters and the model can retry.
+function fixArgs(args) {
+  const text = String(args || '').trim() || '{}';
+  const ok = (t) => { try { const v = JSON.parse(t); return v && typeof v === 'object' && !Array.isArray(v); } catch { return false; } };
+  if (ok(text)) return text;
+  for (const tail of ['"}', '}', '"]}', ']}', '""}', '"}}', '}}']) if (ok(text + tail)) return text + tail;
+  return '{}';
+}
+
+function repairToolHistory(messages, force = false) {
+  let changed = false;
+  for (const m of messages) {
+    if (m.role !== 'assistant' || !m.tool_calls) continue;
+    for (const c of m.tool_calls) {
+      const fixed = fixArgs(c.function?.arguments);
+      if (c.function && fixed !== c.function.arguments) { c.function.arguments = fixed; changed = true; }
+    }
+  }
+  if (force && !changed) {
+    // Could not find the bad call: drop tool-call details from history but keep the conversation text.
+    for (let i = messages.length - 1; i > 0; i--) {
+      const m = messages[i];
+      if (m.role === 'tool') messages[i] = { role: 'user', content: `[tool result] ${String(m.content).slice(0, 1500)}` };
+      else if (m.tool_calls) { delete m.tool_calls; m.content = m.content || '(used a tool)'; }
+    }
+    changed = true;
+  }
+  return changed;
+}
 
 // ---------- messages typed while the assistant works ----------
 function steer(chatId, text, images = []) {

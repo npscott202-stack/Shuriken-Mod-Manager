@@ -334,7 +334,7 @@ function registerIpc() {
     return {
       games: Object.values(GAMES).map((g) => gameView(g.id)),
       settings: settings(),
-      keys: { anthropic: !!store.getSecret('anthropicApiKey'), nexus: !!store.getSecret('nexusApiKey') },
+      keys: { anthropic: !!store.getSecret('anthropicApiKey'), nexus: !!store.getSecret('nexusApiKey'), brave: !!store.getSecret('braveSearchKey') },
       version: app.getVersion(),
     };
   });
@@ -577,7 +577,7 @@ function registerIpc() {
     return s;
   });
   handle('secrets:set', (key, value) => {
-    if (!['anthropicApiKey', 'nexusApiKey'].includes(key)) throw new Error('Unknown secret');
+    if (!['anthropicApiKey', 'nexusApiKey', 'braveSearchKey'].includes(key)) throw new Error('Unknown secret');
     store.setSecret(key, value);
     return true;
   });

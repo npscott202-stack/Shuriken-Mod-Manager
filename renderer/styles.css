@@ -309,3 +309,10 @@ label.field { display: flex; flex-direction: column; gap: 6px; font-size: 11px; 
 
 /* Playtest */
 .game-shot { display: block; max-width: min(560px, 100%); border-radius: 10px; border: 1px solid var(--line-2); margin: 8px 0; cursor: zoom-in; }
+.ai-plan { border: 1px solid var(--line-2); border-radius: 10px; padding: 10px 12px; margin: 8px 0; background: #0d0d13; }
+.ai-plan .step { display: flex; gap: 8px; font-size: 13px; padding: 2px 0; }
+.ai-plan .step .mark { width: 14px; flex: none; color: var(--muted); }
+.ai-plan .step.done { color: var(--muted); text-decoration: line-through; }
+.ai-plan .step.done .mark { color: var(--ok); }
+.ai-plan .step.doing { color: var(--text, #fff); font-weight: 700; }
+.ai-plan .step.doing .mark { color: var(--accent); }

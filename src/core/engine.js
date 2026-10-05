@@ -32,6 +32,17 @@ const MODELS = {
       { name: 'mmproj-Qwen3VL-8B-Instruct-Q8_0.gguf', url: 'https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct-GGUF/resolve/main/mmproj-Qwen3VL-8B-Instruct-Q8_0.gguf', role: 'mmproj' },
     ],
   },
+  'qwen3-vl-8b-thinking': {
+    page: 'https://huggingface.co/Qwen/Qwen3-VL-8B-Thinking-GGUF',
+    label: 'Qwen3-VL 8B Thinking · reasons step by step',
+    about: 'Thinks before it answers: best for hard, multi-step problems (tricky crashes, complex patches). Slower than the 8B Instruct. Needs an 8 GB+ graphics card.',
+    sizeGB: 5.8,
+    minVramGB: 7,
+    files: [
+      { name: 'Qwen3VL-8B-Thinking-Q4_K_M.gguf', url: 'https://huggingface.co/Qwen/Qwen3-VL-8B-Thinking-GGUF/resolve/main/Qwen3VL-8B-Thinking-Q4_K_M.gguf', role: 'model' },
+      { name: 'mmproj-Qwen3VL-8B-Thinking-Q8_0.gguf', url: 'https://huggingface.co/Qwen/Qwen3-VL-8B-Thinking-GGUF/resolve/main/mmproj-Qwen3VL-8B-Thinking-Q8_0.gguf', role: 'mmproj' },
+    ],
+  },
   'qwen3-vl-4b': {
     page: 'https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct-GGUF',
     label: 'Qwen3-VL 4B Instruct · faster, for 4–6 GB GPUs',
@@ -46,8 +57,8 @@ const MODELS = {
 };
 const DEFAULT_MODEL = 'qwen3-vl-2b';
 // Best first: the AI uses the strongest model present unless the user picked one.
-const PREFERENCE = ['qwen3-vl-8b', 'qwen3-vl-4b', 'qwen3-vl-2b'];
-const CONTEXT = 12288;
+const PREFERENCE = ['qwen3-vl-8b', 'qwen3-vl-8b-thinking', 'qwen3-vl-4b', 'qwen3-vl-2b'];
+const CONTEXT = 16384;
 const UA = { 'User-Agent': 'Shuriken (desktop mod manager)' };
 
 const engineDir = () => store.dataDir('engine');
@@ -396,9 +407,10 @@ function gpuReset(e, modelId) {
   return new Error('The graphics driver reset while the AI was answering (usually the GPU ran out of memory, e.g. a game is running). Shuriken restarted the AI in a lighter mode: send your message again.');
 }
 
-// Qwen3-VL's recommended sampling for instruct models, with a presence penalty to discourage
-// repetition (kept moderate so tool-call JSON and code still come out right).
-const SAMPLING = { temperature: 0.7, top_p: 0.8, top_k: 20, presence_penalty: 1.0, repeat_penalty: 1.05 };
+// Qwen3-VL's recommended sampling for instruct models. No presence/repeat penalty: those also
+// punish the quotes and braces JSON must repeat, which broke tool calls. Repetition is handled
+// by looping() and the repeated-tool-call guard instead.
+const SAMPLING = { temperature: 0.7, top_p: 0.8, top_k: 20 };
 
 async function chatTurn({ modelId, messages, tools, signal }, onEvent) {
   const s = await start(modelId);

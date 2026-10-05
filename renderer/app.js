@@ -1167,6 +1167,8 @@ function renderItem(item) {
     } else if (block.type === 'error') parts.push(h('div', { class: 'issue error' }, h('span', { class: 'sev' }), h('div', { class: 'txt' }, block.text)));
     else if (block.type === 'shot') parts.push(h('img', { class: 'game-shot', src: block.dataUrl, title: 'What the AI sees in the game', onClick: () => lightbox(block.dataUrl) }));
     else if (block.type === 'toolreq') parts.push(toolRequestCard(block));
+    else if (block.type === 'plan') parts.push(h('div', { class: 'ai-plan' }, h('div', { class: 'faint small', style: { fontWeight: 700, marginBottom: '4px' } }, 'PLAN'),
+      block.steps.map((st) => h('div', { class: `step ${st.status}` }, h('span', { class: 'mark' }, { done: '✓', doing: '▸', skipped: '–' }[st.status] || '○'), st.text))));
   }
   if (item.stopped) parts.push(h('div', { class: 'faint small' }, '■ Stopped'));
   if (item.pending) parts.push(h('span', { class: 'cursor muted small' }, item.status || (item.blocks.length ? '' : 'Working')));
@@ -1279,6 +1281,11 @@ api.onAiEvent((ev) => {
     reply.blocks.push({ type: 'shot', dataUrl: ev.dataUrl });
     const shots = chat.items.flatMap((it) => it.blocks || []).filter((b) => b.type === 'shot');
     for (const b of shots.slice(0, -8)) { b.type = 'tool'; b.status = 'done'; b.label = 'game screenshot'; delete b.dataUrl; }
+  } else if (ev.type === 'plan') {
+    // One live checklist per answer: update it in place.
+    const existing = reply.blocks.find((b) => b.type === 'plan');
+    if (existing) existing.steps = ev.steps;
+    else reply.blocks.push({ type: 'plan', steps: ev.steps });
   } else if (ev.type === 'toolreq') {
     reply.blocks.push({ type: 'toolreq', name: ev.name, reason: ev.reason, url: ev.url });
   } else if (ev.type === 'status') {
@@ -1886,6 +1893,7 @@ async function pageSettings() {
   };
   const claude = keyInput('anthropic', 'sk-ant-…', state.keys.anthropic);
   const nexusKey = keyInput('nexus', 'Nexus personal API key', state.keys.nexus);
+  const braveKey = keyInput('brave', 'Brave Search API key (optional)', state.keys.brave);
   const model = h('select', { class: 'input' }, ...[['claude-opus-5-5', 'Claude Opus 5.5 (recommended)'], ['claude-sonnet-5-5', 'Claude Sonnet 5.5 (faster, cheaper)'], ['claude-fable-5-1', 'Claude Fable 5.1 (most capable)']].map(([v, l]) => h('option', { value: v, selected: v === s.aiModel }, l)));
   const effort = h('select', { class: 'input' }, ...['low', 'medium', 'high', 'xhigh', 'max'].map((v) => h('option', { value: v, selected: v === s.aiEffort }, v)));
   const launcher = h('input', { class: 'input grow', value: s.minecraftLauncher || '', placeholder: 'Auto-detect' });
@@ -1956,6 +1964,15 @@ async function pageSettings() {
         state.keys.nexus ? h('button', { class: 'btn', onClick: async () => { const u = await run(() => api.call('nexus:validate')); toast(`Connected as ${u.name}${u.is_premium ? ' (Premium)' : ''}`, 'success'); } }, 'Test') : null,
         h('button', { class: 'btn ghost', onClick: () => api.call('shell:open', 'https://www.nexusmods.com/users/myaccount?tab=api') }, 'Get a key')),
       h('div', { class: 'row' }, toggle(s.handleNxm, (v) => setS({ handleNxm: v })), h('div', {}, h('div', { class: 'name' }, 'Handle Nexus downloads'), h('div', { class: 'muted small' }, 'Makes Shuriken the app that opens nxm:// links (replaces Vortex / MO2 for that).'))),
+    ),
+    h('div', { class: 'card' },
+      h('h3', {}, 'AI web research'),
+      h('p', { class: 'muted small' }, 'The AI searches the web, Nexus Mods (names, summaries, versions), game wikis and GitHub for you. Web search uses free engines that sometimes rate-limit; for reliable search add a free Brave Search API key (2,000 searches a month free).'),
+      braveKey.row,
+      h('div', { class: 'row', style: { margin: '10px 0 0' } },
+        h('button', { class: 'btn primary', onClick: () => saveKey('brave', 'braveSearchKey', braveKey.input) }, 'Save key'),
+        state.keys.brave ? h('button', { class: 'btn ghost danger', onClick: async () => { await api.call('secrets:set', 'braveSearchKey', ''); state.keys.brave = false; renderPage(); } }, 'Remove') : null,
+        h('button', { class: 'btn ghost', onClick: () => api.call('shell:open', 'https://brave.com/search/api/') }, 'Get a free key')),
     ),
     h('div', { class: 'card' },
       h('h3', {}, 'Games'),
