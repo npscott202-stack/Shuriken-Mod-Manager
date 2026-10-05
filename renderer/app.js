@@ -1806,8 +1806,8 @@ async function pageSettings() {
         h('input', { type: 'radio', name: 'localModel', checked: m.id === st.model, onChange: async () => { await setS({ localModel: m.id }); drawLocal(); } }),
         h('span', { class: 'grow' }, m.label, h('span', { class: 'faint small' }, ` · ${m.sizeGB} GB`)),
         m.id === st.recommendedModel ? h('span', { class: 'badge win' }, 'best for your GPU') : null,
-        m.installed ? h('span', { class: 'badge' }, 'downloaded') : null,
-        m.installed && m.id !== st.model ? h('button', { class: 'btn small ghost danger', onClick: async (e) => { e.preventDefault(); if (await askConfirm(`Delete the ${m.label} files (${m.sizeGB} GB)?`)) { await api.call('engine:remove', m.id); drawLocal(); } } }, 'Delete') : null));
+        m.builtIn ? h('span', { class: 'badge win' }, 'built in') : m.installed ? h('span', { class: 'badge' }, 'downloaded') : null,
+        m.installed && !m.builtIn && m.id !== st.model ? h('button', { class: 'btn small ghost danger', onClick: async (e) => { e.preventDefault(); if (await askConfirm(`Delete the ${m.label} files (${m.sizeGB} GB)?`)) { await api.call('engine:remove', m.id); drawLocal(); } } }, 'Delete') : null));
       localBox.replaceChildren(
         h('div', { class: 'row wrap', style: { marginBottom: '10px' } },
           h('span', { class: `chip ${st.engineInstalled ? 'ok' : 'warn'}` }, st.engineInstalled ? `Engine ${st.build}` : 'Engine not installed'),

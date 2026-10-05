@@ -10,6 +10,15 @@ const store = require('./store');
 const archives = require('./archives');
 
 const MODELS = {
+  'qwen3-vl-2b': {
+    label: 'Qwen3-VL 2B Instruct · built in, runs on any PC',
+    sizeGB: 1.6,
+    minVramGB: 2,
+    files: [
+      { name: 'Qwen3VL-2B-Instruct-Q4_K_M.gguf', url: 'https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct-GGUF/resolve/main/Qwen3VL-2B-Instruct-Q4_K_M.gguf', role: 'model' },
+      { name: 'mmproj-Qwen3VL-2B-Instruct-Q8_0.gguf', url: 'https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct-GGUF/resolve/main/mmproj-Qwen3VL-2B-Instruct-Q8_0.gguf', role: 'mmproj' },
+    ],
+  },
   'qwen3-vl-8b': {
     label: 'Qwen3-VL 8B Instruct · best quality',
     sizeGB: 5.8,
@@ -29,19 +38,43 @@ const MODELS = {
     ],
   },
 };
-const DEFAULT_MODEL = 'qwen3-vl-8b';
+const DEFAULT_MODEL = 'qwen3-vl-2b';
+// Best first: the AI uses the strongest model present unless the user picked one.
+const PREFERENCE = ['qwen3-vl-8b', 'qwen3-vl-4b', 'qwen3-vl-2b'];
 const CONTEXT = 12288;
 const UA = { 'User-Agent': 'Shuriken (desktop mod manager)' };
 
 const engineDir = () => store.dataDir('engine');
 const modelsDir = () => store.dataDir('models');
 
+// The installer ships the engine and the 2B model in resourcesi, so the AI works offline right
+// after install. Downloaded engines/models in the data folder take precedence.
+function bundledDir() {
+  const candidates = [process.resourcesPath && path.join(process.resourcesPath, 'ai'), path.join(__dirname, '..', '..', 'ai-bundle')].filter(Boolean);
+  return candidates.find((d) => fs.existsSync(path.join(d, 'engine', 'llama-server.exe'))) || null;
+}
+
+function modelFile(name) {
+  const own = path.join(modelsDir(), name);
+  if (fs.existsSync(own)) return own;
+  const b = bundledDir();
+  const shipped = b && path.join(b, 'models', name);
+  return shipped && fs.existsSync(shipped) ? shipped : own;
+}
+
+function builtIn(id) {
+  const b = bundledDir();
+  return !!b && MODELS[id].files.every((f) => fs.existsSync(path.join(b, 'models', f.name)));
+}
+
 // ---------- engine binaries ----------
 function installedBuild() {
   const dir = engineDir();
   const builds = fs.readdirSync(dir).filter((n) => /^b\d+$/.test(n) && fs.existsSync(path.join(dir, n, 'llama-server.exe')));
   builds.sort((a, b) => Number(b.slice(1)) - Number(a.slice(1)));
-  return builds[0] ? { build: builds[0], exe: path.join(dir, builds[0], 'llama-server.exe') } : null;
+  if (builds[0]) return { build: builds[0], exe: path.join(dir, builds[0], 'llama-server.exe') };
+  const b = bundledDir();
+  return b ? { build: 'built-in', exe: path.join(b, 'engine', 'llama-server.exe') } : null;
 }
 
 async function downloadFile(url, dest, onProgress = () => {}, label = '') {
@@ -89,18 +122,24 @@ async function installEngine(onProgress) {
 function modelPaths(id) {
   const m = MODELS[id];
   if (!m) throw new Error(`Unknown model ${id}`);
-  const p = (role) => path.join(modelsDir(), m.files.find((f) => f.role === role).name);
+  const p = (role) => modelFile(m.files.find((f) => f.role === role).name);
   return { model: p('model'), mmproj: p('mmproj') };
 }
 
 function modelInstalled(id) {
-  return MODELS[id].files.every((f) => fs.existsSync(path.join(modelsDir(), f.name)));
+  return MODELS[id].files.every((f) => fs.existsSync(modelFile(f.name)));
+}
+
+// The model to use: the user's choice if it is installed, else the best installed one.
+function resolveModel(preferred) {
+  if (preferred && MODELS[preferred] && modelInstalled(preferred)) return preferred;
+  return PREFERENCE.find((id) => modelInstalled(id)) || (MODELS[preferred] ? preferred : DEFAULT_MODEL);
 }
 
 async function installModel(id, onProgress) {
   for (const f of MODELS[id].files) {
     const dest = path.join(modelsDir(), f.name);
-    if (!fs.existsSync(dest)) await downloadFile(f.url, dest, onProgress, f.role === 'model' ? 'AI model' : 'Screenshot reader');
+    if (!fs.existsSync(modelFile(f.name))) await downloadFile(f.url, dest, onProgress, f.role === 'model' ? 'AI model' : 'Screenshot reader');
   }
 }
 
@@ -234,11 +273,11 @@ async function status(modelId = DEFAULT_MODEL) {
     engineInstalled: !!eng,
     build: eng?.build || null,
     model: modelId,
-    models: Object.entries(MODELS).map(([id, m]) => ({ id, label: m.label, sizeGB: m.sizeGB, installed: modelInstalled(id), recommended: device ? device.totalMB / 1024 >= m.minVramGB : id === 'qwen3-vl-4b' })),
+    models: Object.entries(MODELS).map(([id, m]) => ({ id, label: m.label, sizeGB: m.sizeGB, installed: modelInstalled(id), builtIn: builtIn(id), recommended: device ? device.totalMB / 1024 >= m.minVramGB : id === 'qwen3-vl-4b' })),
     ready: !!eng && modelInstalled(modelId),
     running: !!server && server.proc.exitCode === null,
     device: device ? `${device.name} (${Math.round(device.totalMB / 1024)} GB)` : 'CPU (no supported GPU found)',
-    recommendedModel: device && device.totalMB / 1024 >= MODELS['qwen3-vl-8b'].minVramGB ? 'qwen3-vl-8b' : 'qwen3-vl-4b',
+    recommendedModel: !device ? 'qwen3-vl-2b' : device.totalMB / 1024 >= MODELS['qwen3-vl-8b'].minVramGB ? 'qwen3-vl-8b' : device.totalMB / 1024 >= MODELS['qwen3-vl-4b'].minVramGB ? 'qwen3-vl-4b' : 'qwen3-vl-2b',
   };
 }
 
@@ -325,4 +364,4 @@ async function chatTurn({ modelId, messages, tools, signal }, onEvent) {
   return msg;
 }
 
-module.exports = { MODELS, DEFAULT_MODEL, status, setup, warm, installEngine, installModel, removeModel, start, stop, chatTurn, listDevices, pickDevice };
+module.exports = { MODELS, DEFAULT_MODEL, resolveModel, status, setup, warm, installEngine, installModel, removeModel, start, stop, chatTurn, listDevices, pickDevice };

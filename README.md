@@ -4,12 +4,12 @@ AI-powered multi-game mod manager, modpack assembler and mod workshop for Window
 
 ## Download
 
-Go to **[Releases](../../releases/latest)** and download `Shuriken-0.6.0-Windows.zip`. Extract it and open **READ FIRST.txt** for the full setup guide.
+Go to **[Releases](../../releases/latest)** and download `Shuriken-0.6.1-Windows.zip`. Extract it and open **READ FIRST.txt** for the full setup guide.
 
 Quick start:
-1. Run `Shuriken Setup 0.6.0.exe`. Windows SmartScreen may warn about an unsigned app: click **More info → Run anyway**.
+1. Run `Shuriken Setup 0.6.1.exe`. Windows SmartScreen may warn about an unsigned app: click **More info → Run anyway**.
 2. Shuriken finds your Steam games automatically. Use **Game Library** for everything else.
-3. For the free AI: **Settings → AI assistant → Set up Shuriken AI**. Shuriken downloads its built-in engine (llama.cpp, Vulkan) and a Qwen3-VL model once (3–6 GB). No account, no API key, nothing else to install.
+3. The free AI is already inside the installer: the llama.cpp engine (Vulkan) plus the Qwen3-VL 2B model, so the assistant works offline straight away with no account or API key. Bigger models (Qwen3-VL 4B/8B) are one-click optional downloads in **Settings → AI assistant**. The portable exe stays small and downloads the AI on first use.
 4. Install mods (drag archives in, or use **Get Mods**), click **Deploy**, then **Play**.
 
 Requirements: Windows 10/11 64-bit. The built-in AI works best with a 4–8 GB NVIDIA, AMD or Intel GPU and 16 GB RAM (it also runs on the CPU, slower).

@@ -759,7 +759,7 @@ function shrinkForLocal(base64) {
 }
 
 async function sendLocal({ chat, gameId, text, images }, emit, approve, cfg) {
-  const modelId = engine.MODELS[cfg.localModel] ? cfg.localModel : engine.DEFAULT_MODEL;
+  const modelId = engine.resolveModel(cfg.localModel);
   const st = await engine.status(modelId);
   if (!st.ready) throw new Error('Shuriken AI is not set up yet. Open Settings → AI assistant and click "Set up Shuriken AI" (one-time download).');
   if (!st.running) emit({ type: 'status', text: 'Starting Shuriken AI (first answer takes a little longer)…' });

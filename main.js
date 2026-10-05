@@ -631,11 +631,11 @@ function registerIpc() {
     declineApprovals(chatId);
     ai.reset(chatId);
   });
-  handle('engine:status', () => engine.status(settings().localModel || engine.DEFAULT_MODEL));
-  handle('engine:setup', (modelId) => engine.setup(modelId || settings().localModel || engine.DEFAULT_MODEL, (ev) => send('engine:progress', ev)));
+  handle('engine:status', () => engine.status(engine.resolveModel(settings().localModel)));
+  handle('engine:setup', (modelId) => engine.setup(modelId || engine.resolveModel(settings().localModel), (ev) => send('engine:progress', ev)));
   handle('engine:remove', (modelId) => engine.removeModel(modelId));
   handle('engine:stop', () => engine.stop());
-  handle('engine:warm', () => engine.warm(settings().localModel || engine.DEFAULT_MODEL));
+  handle('engine:warm', () => engine.warm(engine.resolveModel(settings().localModel)));
   handle('log:error', (where, message) => logError(`renderer:${where}`, message));
   handle('logs:open', () => shell.openPath(store.dataDir('logs')));
   // Text for "Copy bug report": versions, games and the tail of the logs (no keys or personal paths beyond folders).
@@ -648,7 +648,7 @@ function registerIpc() {
       }
     };
     const s = settings();
-    const st = await engine.status(s.localModel || engine.DEFAULT_MODEL).catch((e) => ({ error: e.message }));
+    const st = await engine.status(engine.resolveModel(s.localModel)).catch((e) => ({ error: e.message }));
     return [
       `Shuriken ${app.getVersion()} · Electron ${process.versions.electron} · Windows ${require('os').release()}`,
       `AI: ${ai.provider(s)} · engine ${st.build || 'not installed'} · model ${st.model} ready=${st.ready} · ${st.device || ''}`,

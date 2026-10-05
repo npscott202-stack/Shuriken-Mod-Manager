@@ -1,7 +1,7 @@
 {
   "name": "shuriken",
   "productName": "Shuriken",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Shuriken: AI-powered multi-game mod manager, modpack assembler and mod workshop.",
   "main": "main.js",
   "author": "Shuriken",
@@ -9,8 +9,9 @@
   "scripts": {
     "start": "electron .",
     "selftest": "electron . --selftest",
-    "dist": "electron-builder --win nsis portable --publish never",
-    "dist:portable": "electron-builder --win portable --publish never"
+    "dist": "electron-builder --win portable --publish never && electron-builder --win nsis --publish never --config builder-full.js",
+    "dist:portable": "electron-builder --win portable --publish never",
+    "ai:bundle": "node scripts/bundle-ai.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "latest",
