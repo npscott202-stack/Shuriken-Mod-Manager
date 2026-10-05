@@ -1008,12 +1008,27 @@ function pageAi() {
   const stopBtn = h('button', { class: 'btn danger', style: { display: chat.busy ? '' : 'none' }, onClick: () => stopChat(chat) }, '■ Stop');
   if (chat.busy) { sendBtn.textContent = 'Tell AI'; sendBtn.title = 'The assistant reads this after its current step'; }
   const setupBanner = h('div');
+  const upgradeBox = h('div');
+  aiUpgradeBanner(upgradeBox);
   if (aiProvider() === 'local') {
     api.call('engine:status').then((st) => {
       if (st.ready && !st.running) api.call('engine:warm').catch(() => {});
-      if (!st.ready) setupBanner.replaceChildren(h('div', { class: 'issue warning', style: { margin: '12px 24px 0' } }, h('span', { class: 'sev' }),
-        h('div', { class: 'txt' }, 'Shuriken AI needs a one-time setup (free download of the engine and model).'),
-        h('button', { class: 'btn small primary', onClick: () => go('settings') }, 'Set up now')));
+      if (!st.ready) {
+        // Portable build (no AI inside): one click fetches the engine and the model that fits this PC.
+        const rec = st.models.find((m) => m.id === st.recommendedModel) || st.models[0];
+        const draw = () => {
+          const dl = state.aiDl;
+          setupBanner.replaceChildren(h('div', { class: 'issue warning', style: { margin: '12px 24px 0' } }, h('span', { class: 'sev' }),
+            h('div', { class: 'txt' },
+              h('div', {}, dl ? `Downloading the AI… ${dl.label}: ${fmtBytes(dl.done)}${dl.total ? ` / ${fmtBytes(dl.total)}` : ''}` : `Shuriken AI needs a one-time free download: the engine plus ${rec.label.split(' ·')[0]} (${rec.sizeGB} GB, picked for your PC).`),
+              dl?.total ? h('div', { class: 'progress', style: { marginTop: '6px' } }, h('div', { style: { width: `${Math.round((100 * dl.done) / dl.total)}%` } })) : null),
+            dl ? h('button', { class: 'btn small ghost', onClick: () => api.call('engine:cancelDownload') }, 'Cancel') : [
+              h('button', { class: 'btn small primary', onClick: () => startModelDownload(rec, draw) }, 'Download now'),
+              h('button', { class: 'btn small', onClick: () => go('settings') }, 'Choose another / install by hand')]));
+        };
+        draw();
+        watchAiDownload(setupBanner, (ev) => { if (ev.finished) setupBanner.replaceChildren(); else draw(); });
+      }
     }).catch(() => {});
   }
   const autoFix = toggle(state.settings.aiAutoApprove, async (v) => {
@@ -1065,6 +1080,7 @@ function pageAi() {
       h('button', { class: 'btn small', onClick: async () => { await api.call('ai:reset', chat.id); state.chats[g.id] = null; renderPage(); } }, chat.busy ? 'Stop & new chat' : 'New chat'),
     ),
     setupBanner,
+    upgradeBox,
     log,
     h('div', { class: 'composer' },
       attachments,
@@ -1507,6 +1523,118 @@ async function pageDiagnostics() {
 }
 
 
+// ---------- AI models: download, switch, manual install ----------
+// Downloads keep running in the background (main process); every open view follows the progress.
+const aiDlWatchers = new Set();
+api.onEngineProgress((ev) => {
+  if (!ev.modelId) return;
+  state.aiDl = ev.finished || ev.cancelled || ev.error ? null : ev;
+  if (ev.finished) refreshGame();
+  for (const fn of [...aiDlWatchers]) {
+    if (!fn.el?.isConnected && fn.el) { aiDlWatchers.delete(fn); continue; }
+    fn(ev);
+  }
+});
+
+function watchAiDownload(el, fn) {
+  fn.el = el;
+  aiDlWatchers.add(fn);
+}
+
+async function startModelDownload(m, after) {
+  const ok = await askConfirm(`Download ${m.label.split(' ·')[0]} (${m.sizeGB} GB)?\n\nIt downloads in the background, so you can keep using Shuriken, and resumes if it gets interrupted. When it finishes, the AI assistant switches to it automatically.\n\nSource: ${m.page}`, { title: 'Download AI model', ok: 'Download' });
+  if (!ok) return;
+  const r = await run(() => api.call('engine:download', m.id));
+  if (r) { state.aiDl = { modelId: m.id, label: 'Starting', done: 0, total: 0 }; after?.(); }
+}
+
+// Model rows for Settings and the upgrade prompt. redraw() re-renders the owner when a download ends.
+function aiModelList(st, redraw, { compact = false } = {}) {
+  const list = h('div');
+  const rows = st.models.filter((m) => !compact || !m.installed).map((m) => {
+    const bar = h('div', { class: 'progress', style: { display: 'none', margin: '8px 0 2px' } }, h('div', { style: { width: '0%' } }));
+    const txt = h('div', { class: 'faint small' });
+    const actions = h('div', { class: 'row' });
+    const paint = () => {
+      const dl = state.aiDl && state.aiDl.modelId === m.id ? state.aiDl : null;
+      bar.style.display = dl ? '' : 'none';
+      if (dl?.total) bar.firstChild.style.width = `${Math.round((100 * dl.done) / dl.total)}%`;
+      txt.textContent = dl ? `${dl.label}: ${fmtBytes(dl.done)}${dl.total ? ` / ${fmtBytes(dl.total)}` : ''}` : '';
+      actions.replaceChildren(
+        m.id === st.recommendedModel && !compact ? h('span', { class: 'badge win' }, 'best for your GPU') : null,
+        m.builtIn ? h('span', { class: 'badge win' }, 'built in') : m.installed ? h('span', { class: 'badge' }, 'downloaded') : null,
+        dl ? h('button', { class: 'btn small ghost', onClick: async (e) => { e.preventDefault(); await api.call('engine:cancelDownload'); } }, 'Cancel')
+          : !m.installed ? h('button', { class: 'btn small primary', disabled: !!state.aiDl, onClick: (e) => { e.preventDefault(); startModelDownload(m, paint); } }, `Download ${m.sizeGB} GB`) : null,
+        m.installed && !m.builtIn && m.id !== st.model && !compact ? h('button', { class: 'btn small ghost danger', onClick: async (e) => { e.preventDefault(); if (await askConfirm(`Delete the ${m.label} files (${m.sizeGB} GB)?`, { title: 'Delete model', ok: 'Delete', danger: true })) { await api.call('engine:remove', m.id); redraw(); } } }, 'Delete') : null);
+    };
+    paint();
+    const row = h('label', { class: 'fomod-opt', style: { margin: '0 0 6px', alignItems: 'flex-start' } },
+      compact ? null : h('input', { type: 'radio', name: 'localModel', checked: m.id === st.model, disabled: !m.installed, title: m.installed ? '' : 'Download it first', onChange: async () => { state.settings = await api.call('settings:set', { localModel: m.id }); await api.call('engine:stop'); redraw(); } }),
+      h('div', { class: 'grow' },
+        h('div', {}, m.label, h('span', { class: 'faint small' }, ` · ${m.sizeGB} GB`)),
+        m.about ? h('div', { class: 'faint small' }, m.about) : null,
+        bar, txt),
+      actions);
+    watchAiDownload(row, (ev) => { if (ev.modelId === m.id && (ev.finished || ev.cancelled || ev.error)) redraw(); else paint(); });
+    return row;
+  });
+  list.append(...rows);
+  return list;
+}
+
+function aiManualSteps(st) {
+  const bigger = st.models.filter((m) => !m.builtIn);
+  return h('details', { style: { marginTop: '10px' } },
+    h('summary', { class: 'small muted', style: { cursor: 'pointer' } }, 'How to install a model by hand (slow or blocked downloads)'),
+    h('ol', { class: 'small muted', style: { paddingLeft: '18px', lineHeight: 1.6 } },
+      h('li', {}, 'Open the model page and go to "Files and versions":',
+        bigger.map((m) => h('div', {}, h('a', { href: '#', onClick: (e) => { e.preventDefault(); api.call('shell:open', m.page); } }, m.label.split(' ·')[0]), ` - download both files: ${m.files.join(' and ')}`))),
+      h('li', {}, 'Wait until both files have finished downloading (check the sizes).'),
+      h('li', {}, 'Click "Import downloaded files…" below and select both files, or copy them into the models folder yourself.'),
+      h('li', {}, 'Pick the model in the list above. Shuriken uses it for the next question.')),
+    h('div', { class: 'row wrap' },
+      h('button', { class: 'btn small', onClick: async () => {
+        const r = await run(() => api.call('engine:import'));
+        if (!r) return;
+        if (r.unknown.length) toast(`Not a Shuriken model file: ${r.unknown.join(', ')}`, 'error', 8000);
+        if (r.complete.length) toast('Model added and selected.', 'success');
+        else if (r.added.length) toast(`Added ${r.added.join(', ')}. Import the other file of the pair too.`, 'info', 8000);
+        renderPage();
+      } }, 'Import downloaded files…'),
+      h('button', { class: 'btn small ghost', onClick: () => api.call('engine:openModels') }, 'Open models folder')));
+}
+
+// AI page: offer the bigger model when the PC can run it and only the small built-in one is there.
+function aiUpgradeBanner(box, status = null) {
+  if (aiProvider() !== 'local' || state.settings.aiUpgradeDismissed) return;
+  (status ? Promise.resolve(status) : api.call('engine:status')).then((st) => {
+    const rec = st.models.find((m) => m.id === st.recommendedModel);
+    const cur = st.models.find((m) => m.id === st.model);
+    if (!st.ready || !rec || rec.installed || !cur?.builtIn) return;
+    const draw = () => {
+      const dl = state.aiDl;
+      box.replaceChildren(h('div', { class: 'card', style: { margin: '10px 16px 0', padding: '12px 14px', borderColor: 'rgba(61,220,151,.35)' } },
+        h('div', { class: 'row wrap' },
+          h('div', { class: 'grow' },
+            h('div', { class: 'name' }, dl ? `Downloading ${engineLabel(st, dl.modelId)}…` : `Upgrade the AI: your graphics card can run ${rec.label.split(' ·')[0]}`),
+            h('div', { class: 'faint small' }, dl
+              ? `${dl.label}: ${fmtBytes(dl.done)}${dl.total ? ` / ${fmtBytes(dl.total)}` : ''}. Keep chatting; it switches automatically when done.`
+              : `You're using the small built-in model. ${rec.about} One-time ${rec.sizeGB} GB download, free, runs on your PC.`)),
+          dl ? h('button', { class: 'btn small ghost', onClick: () => api.call('engine:cancelDownload') }, 'Cancel') : [
+            h('button', { class: 'btn small primary', onClick: () => startModelDownload(rec, draw) }, 'Download & switch automatically'),
+            h('button', { class: 'btn small', onClick: () => go('settings') }, 'Other options'),
+            h('button', { class: 'btn small ghost', onClick: async () => { state.settings = await api.call('settings:set', { aiUpgradeDismissed: true }); box.replaceChildren(); } }, 'Not now')]),
+        dl?.total ? h('div', { class: 'progress', style: { marginTop: '8px' } }, h('div', { style: { width: `${Math.round((100 * dl.done) / dl.total)}%` } })) : null));
+    };
+    draw();
+    watchAiDownload(box, (ev) => { if (ev.finished) box.replaceChildren(); else draw(); });
+  }).catch(() => {});
+}
+
+function engineLabel(st, id) {
+  return (st.models.find((m) => m.id === id)?.label || id).split(' ·')[0];
+}
+
 // ---------- Playtest ----------
 async function startPlaytest(g) {
   const bethesda = g.kind === 'bethesda';
@@ -1782,32 +1910,8 @@ async function pageSettings() {
   const drawLocal = async () => {
     try {
       const st = await api.call('engine:status');
-      const progress = h('div', { class: 'progress', style: { display: 'none', margin: '10px 0 4px' } }, h('div', { style: { width: '0%' } }));
-      const progressText = h('div', { class: 'faint small' });
       const chosen = st.models.find((m) => m.id === st.model) || st.models[0];
-      const setupBtn = h('button', { class: 'btn primary' }, st.ready ? 'Re-check' : `Set up Shuriken AI (${chosen.sizeGB} GB, one time)`);
-      setupBtn.addEventListener('click', async () => {
-        setupBtn.disabled = true;
-        progress.style.display = '';
-        const off = api.onEngineProgress((ev) => {
-          if (ev.total) progress.firstChild.style.width = `${Math.round((100 * ev.done) / ev.total)}%`;
-          progressText.textContent = `${ev.label}: ${fmtBytes(ev.done)}${ev.total ? ` / ${fmtBytes(ev.total)}` : ''}`;
-        });
-        try {
-          await api.call('engine:setup', st.model);
-          toast('Shuriken AI is ready', 'success');
-        } catch (e) {
-          toast(e.message, 'error', 10000);
-        }
-        off();
-        drawLocal();
-      });
-      const modelRows = st.models.map((m) => h('label', { class: 'fomod-opt', style: { margin: '0 0 6px' } },
-        h('input', { type: 'radio', name: 'localModel', checked: m.id === st.model, onChange: async () => { await setS({ localModel: m.id }); drawLocal(); } }),
-        h('span', { class: 'grow' }, m.label, h('span', { class: 'faint small' }, ` · ${m.sizeGB} GB`)),
-        m.id === st.recommendedModel ? h('span', { class: 'badge win' }, 'best for your GPU') : null,
-        m.builtIn ? h('span', { class: 'badge win' }, 'built in') : m.installed ? h('span', { class: 'badge' }, 'downloaded') : null,
-        m.installed && !m.builtIn && m.id !== st.model ? h('button', { class: 'btn small ghost danger', onClick: async (e) => { e.preventDefault(); if (await askConfirm(`Delete the ${m.label} files (${m.sizeGB} GB)?`)) { await api.call('engine:remove', m.id); drawLocal(); } } }, 'Delete') : null));
+      const modelRows = aiModelList(st, drawLocal);
       localBox.replaceChildren(
         h('div', { class: 'row wrap', style: { marginBottom: '10px' } },
           h('span', { class: `chip ${st.engineInstalled ? 'ok' : 'warn'}` }, st.engineInstalled ? `Engine ${st.build}` : 'Engine not installed'),
@@ -1815,9 +1919,10 @@ async function pageSettings() {
           h('span', { class: `chip ${st.running ? 'ok' : ''}` }, st.running ? 'Running' : 'Idle'),
           h('span', { class: 'chip' }, `GPU: ${st.device}`)),
         h('div', { style: { marginBottom: '10px' } }, modelRows),
-        h('div', { class: 'row wrap' }, st.ready ? null : setupBtn,
+        st.ready ? null : h('div', { class: 'issue warning' }, h('span', { class: 'sev' }), h('div', { class: 'txt small' }, 'The AI is not set up yet. Click Download next to a model (the engine comes with it). The 2B model is the smallest; pick the one marked "best for your GPU" for better answers.')),
+        h('div', { class: 'row wrap' },
           st.running ? h('button', { class: 'btn', onClick: async () => { await api.call('engine:stop'); toast('Shuriken AI stopped; GPU memory freed.', 'success'); drawLocal(); } }, 'Free GPU memory') : null),
-        progress, progressText,
+        aiManualSteps(st),
         h('p', { class: 'faint small', style: { marginTop: '10px' } }, "Runs entirely on your PC with Shuriken's built-in engine (llama.cpp + Qwen3-VL). No account, no API key, nothing leaves your computer. It unloads after 20 idle minutes so your games get the GPU back."));
     } catch (e) {
       localBox.textContent = e.message;

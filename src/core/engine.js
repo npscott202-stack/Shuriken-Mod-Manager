@@ -11,7 +11,9 @@ const archives = require('./archives');
 
 const MODELS = {
   'qwen3-vl-2b': {
+    page: 'https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct-GGUF',
     label: 'Qwen3-VL 2B Instruct · built in, runs on any PC',
+    about: 'Ships with the installer. Fast; best for quick questions and reading screenshots.',
     sizeGB: 1.6,
     minVramGB: 2,
     files: [
@@ -20,7 +22,9 @@ const MODELS = {
     ],
   },
   'qwen3-vl-8b': {
+    page: 'https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct-GGUF',
     label: 'Qwen3-VL 8B Instruct · best quality',
+    about: 'Much better at multi-step fixes, playtests and reading busy screenshots. Needs an 8 GB+ graphics card.',
     sizeGB: 5.8,
     minVramGB: 7,
     files: [
@@ -29,7 +33,9 @@ const MODELS = {
     ],
   },
   'qwen3-vl-4b': {
+    page: 'https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct-GGUF',
     label: 'Qwen3-VL 4B Instruct · faster, for 4–6 GB GPUs',
+    about: 'A good step up from the built-in model for 4-6 GB graphics cards.',
     sizeGB: 3.0,
     minVramGB: 4,
     files: [
@@ -77,25 +83,29 @@ function installedBuild() {
   return b ? { build: 'built-in', exe: path.join(b, 'engine', 'llama-server.exe') } : null;
 }
 
-async function downloadFile(url, dest, onProgress = () => {}, label = '') {
+async function downloadFile(url, dest, onProgress = () => {}, label = '', signal) {
   const part = `${dest}.part`;
   const have = fs.existsSync(part) ? fs.statSync(part).size : 0;
-  const res = await fetch(url, { headers: { ...UA, ...(have ? { Range: `bytes=${have}-` } : {}) }, redirect: 'follow' });
+  const res = await fetch(url, { headers: { ...UA, ...(have ? { Range: `bytes=${have}-` } : {}) }, redirect: 'follow', signal });
   if (!res.ok && res.status !== 206) throw new Error(`Download failed (${res.status}) for ${path.basename(dest)}`);
   const resumed = res.status === 206;
   const total = Number(res.headers.get('content-length') || 0) + (resumed ? have : 0);
   const out = fs.createWriteStream(part, { flags: resumed ? 'a' : 'w' });
   let done = resumed ? have : 0;
   let last = 0;
-  for await (const chunk of res.body) {
-    if (!out.write(chunk)) await new Promise((r) => out.once('drain', r));
-    done += chunk.length;
-    if (Date.now() - last > 300) {
-      last = Date.now();
-      onProgress({ label, done, total });
+  try {
+    for await (const chunk of res.body) {
+      if (!out.write(chunk)) await new Promise((r) => out.once('drain', r));
+      done += chunk.length;
+      if (Date.now() - last > 300) {
+        last = Date.now();
+        onProgress({ label, done, total });
+      }
     }
+  } finally {
+    // Keep the .part file so a cancelled or failed download resumes where it stopped.
+    await new Promise((resolve) => out.end(resolve));
   }
-  await new Promise((resolve, reject) => out.end((e) => (e ? reject(e) : resolve())));
   fs.renameSync(part, dest);
   onProgress({ label, done, total });
 }
@@ -136,11 +146,32 @@ function resolveModel(preferred) {
   return PREFERENCE.find((id) => modelInstalled(id)) || (MODELS[preferred] ? preferred : DEFAULT_MODEL);
 }
 
-async function installModel(id, onProgress) {
+async function installModel(id, onProgress, signal) {
   for (const f of MODELS[id].files) {
     const dest = path.join(modelsDir(), f.name);
-    if (!fs.existsSync(modelFile(f.name))) await downloadFile(f.url, dest, onProgress, f.role === 'model' ? 'AI model' : 'Screenshot reader');
+    if (!fs.existsSync(modelFile(f.name))) await downloadFile(f.url, dest, onProgress, f.role === 'model' ? 'AI model' : 'Screenshot reader', signal);
   }
+}
+
+// Adds model files the user downloaded by hand (from the model's Hugging Face page).
+function importModelFiles(paths) {
+  const known = new Map();
+  for (const [id, m] of Object.entries(MODELS)) for (const f of m.files) known.set(f.name.toLowerCase(), { id, name: f.name });
+  const added = [];
+  const unknown = [];
+  for (const p of paths) {
+    const hit = known.get(path.basename(p).toLowerCase());
+    if (!hit) { unknown.push(path.basename(p)); continue; }
+    const dest = path.join(modelsDir(), hit.name);
+    if (path.resolve(p).toLowerCase() !== path.resolve(dest).toLowerCase()) fs.copyFileSync(p, dest);
+    added.push(hit);
+  }
+  const complete = [...new Set(added.map((a) => a.id))].filter((id) => modelInstalled(id));
+  return { added: added.map((a) => a.name), unknown, complete };
+}
+
+function modelsFolder() {
+  return modelsDir();
 }
 
 function removeModel(id) {
@@ -273,7 +304,7 @@ async function status(modelId = DEFAULT_MODEL) {
     engineInstalled: !!eng,
     build: eng?.build || null,
     model: modelId,
-    models: Object.entries(MODELS).map(([id, m]) => ({ id, label: m.label, sizeGB: m.sizeGB, installed: modelInstalled(id), builtIn: builtIn(id), recommended: device ? device.totalMB / 1024 >= m.minVramGB : id === 'qwen3-vl-4b' })),
+    models: Object.entries(MODELS).map(([id, m]) => ({ id, label: m.label, about: m.about, page: m.page, files: m.files.map((f) => f.name), sizeGB: m.sizeGB, installed: modelInstalled(id), builtIn: builtIn(id), recommended: device ? device.totalMB / 1024 >= m.minVramGB : id === 'qwen3-vl-4b' })),
     ready: !!eng && modelInstalled(modelId),
     running: !!server && server.proc.exitCode === null,
     device: device ? `${device.name} (${Math.round(device.totalMB / 1024)} GB)` : 'CPU (no supported GPU found)',
@@ -364,4 +395,4 @@ async function chatTurn({ modelId, messages, tools, signal }, onEvent) {
   return msg;
 }
 
-module.exports = { MODELS, DEFAULT_MODEL, resolveModel, status, setup, warm, installEngine, installModel, removeModel, start, stop, chatTurn, listDevices, pickDevice };
+module.exports = { MODELS, DEFAULT_MODEL, resolveModel, importModelFiles, modelsFolder, status, setup, warm, installEngine, installModel, removeModel, start, stop, chatTurn, listDevices, pickDevice };

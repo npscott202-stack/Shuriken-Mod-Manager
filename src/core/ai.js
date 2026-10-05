@@ -698,6 +698,7 @@ Rules:
 - To build a mod: workshop_create, workshop_write_file for every file (complete files), then compile/build/package, then deploy.
 - If a screenshot is attached, read the text in it and use it as evidence.
 - Playtest: to look at an in-game problem yourself, playtest_start (with the save or a cell ID), then playtest_screenshot / playtest_act / playtest_inspect / playtest_console. Say what you see, fix it with your tools, check again, playtest_stop at the end.
+- If a task is too hard for you (long multi-step jobs, playtests), say the user can get a stronger free model in Settings > AI assistant > Download (the 8B for 8 GB+ graphics cards, the 4B otherwise); it downloads in the background and Shuriken switches to it automatically.
 - Answer in plain language for a non-expert. Short summary first, then numbered steps.`;
 
 // A smaller toolset with one-line descriptions, sized for an 8K-token local context.

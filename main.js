@@ -8,6 +8,7 @@ const store = require('./src/core/store');
 const { GAMES, CORE, detectAll, detectMinecraftProfiles, publicInfo } = require('./src/core/games');
 
 let win = null;
+let aiDownload = null; // { modelId, label, done, total, abort }
 let mods, plugins, archives, diagnostics, tools, ai, downloads, modrinth, nexus, loaders, workshop, mcx, beth, engine, thunderstore, vfs, saves, precombines, playtest, toolstore;
 
 const pendingApprovals = new Map();
@@ -634,6 +635,55 @@ function registerIpc() {
   handle('engine:status', () => engine.status(engine.resolveModel(settings().localModel)));
   handle('engine:setup', (modelId) => engine.setup(modelId || engine.resolveModel(settings().localModel), (ev) => send('engine:progress', ev)));
   handle('engine:remove', (modelId) => engine.removeModel(modelId));
+  // Bigger models download in the background (the user can leave the page) and the AI switches
+  // to them automatically when done. Progress goes out on engine:progress with the model id.
+  handle('engine:download', (modelId) => {
+    if (!engine.MODELS[modelId]) throw new Error('Unknown model');
+    if (aiDownload) throw new Error(`Already downloading ${engine.MODELS[aiDownload.modelId].label}`);
+    const abort = new AbortController();
+    aiDownload = { modelId, label: 'Starting', done: 0, total: 0, abort };
+    const progress = (ev) => {
+      Object.assign(aiDownload, { label: ev.label, done: ev.done, total: ev.total });
+      send('engine:progress', { modelId, label: ev.label, done: ev.done, total: ev.total });
+    };
+    (async () => {
+      try {
+        await engine.installEngine(progress);
+        await engine.installModel(modelId, progress, abort.signal);
+        const s = settings();
+        s.localModel = modelId;
+        store.save('settings', s);
+        engine.stop(); // the next question loads the new model
+        send('engine:progress', { modelId, finished: true });
+        send('toast', { kind: 'info', text: `${engine.MODELS[modelId].label.split(' ·')[0]} is ready. The AI assistant uses it from now on.` });
+      } catch (e) {
+        const cancelled = abort.signal.aborted;
+        send('engine:progress', { modelId, [cancelled ? 'cancelled' : 'error']: cancelled ? true : e.message });
+        if (!cancelled) {
+          logError('ai-download', e);
+          send('toast', { kind: 'error', text: `AI download failed: ${e.message}. Click Download again to resume.` });
+        }
+      } finally {
+        aiDownload = null;
+      }
+    })();
+    return { started: true };
+  });
+  handle('engine:downloadStatus', () => (aiDownload ? { modelId: aiDownload.modelId, label: aiDownload.label, done: aiDownload.done, total: aiDownload.total } : null));
+  handle('engine:cancelDownload', () => { aiDownload?.abort.abort(); });
+  handle('engine:openModels', () => shell.openPath(engine.modelsFolder()));
+  handle('engine:import', async () => {
+    const r = await dialog.showOpenDialog(win, { title: 'Add downloaded AI model files (.gguf)', properties: ['openFile', 'multiSelections'], filters: [{ name: 'AI model files', extensions: ['gguf'] }] });
+    if (r.canceled || !r.filePaths.length) return null;
+    const out = engine.importModelFiles(r.filePaths);
+    if (out.complete.length) {
+      const s = settings();
+      s.localModel = out.complete[0];
+      store.save('settings', s);
+      engine.stop();
+    }
+    return out;
+  });
   handle('engine:stop', () => engine.stop());
   handle('engine:warm', () => engine.warm(engine.resolveModel(settings().localModel)));
   handle('log:error', (where, message) => logError(`renderer:${where}`, message));
