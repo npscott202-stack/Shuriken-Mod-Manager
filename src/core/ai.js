@@ -23,6 +23,7 @@ const precombines = require('./precombines');
 const playtest = require('./playtest');
 const toolstore = require('./toolstore');
 const research = require('./research');
+const cloud = require('./cloud');
 
 // Does a tool apply to this game? games: undefined (all), a kind, a game id, or 'thunderstore'.
 function toolFits(t, g) {
@@ -150,7 +151,7 @@ TOOL_DEFS.push(
   { name: 'playtest_start', write: true, description: 'Playtest mode: launches the game with the current mods (or attaches if it is already running), optionally loads a save (Bethesda: save file name) or travels to a location (Bethesda: cell editor ID for coc, see playtest_find_location), and returns a screenshot. Use it when the user wants you to go look at a problem in game.', input_schema: obj({ save: { type: 'string', description: 'Save file name, e.g. from list_saves (Bethesda)' }, location: { type: 'string', description: 'Cell editor ID to coc to (Bethesda)' }, wait_seconds: { type: 'integer', description: 'Seconds to wait for the main menu after launch (default 45)' } }, []) },
   { name: 'playtest_screenshot', write: false, description: 'Playtest: captures the game window so you can see what is on screen right now.', input_schema: obj({}, []) },
   { name: 'playtest_console', write: false, games: 'bethesda', description: 'Playtest (Bethesda): runs console commands in the running game and returns the console output. Examples: coc <cell>, cow <world> x y, tgm, tcl, tfc, player.moveto <ref id>, prid <ref id> then disable/enable/getpos x, help <word> 4 (search forms by name), player.additem <id> <n>, setstage, sqv <quest>, getav, save <name>, load <name>. Never use commands that wreck the user\'s save permanently without saying so; prefer testing on a new save made with "save ShurikenTest".', input_schema: obj({ commands: { type: 'array', items: S } }) },
-  { name: 'playtest_act', write: false, description: 'Playtest: presses/holds keys, moves the mouse to look around, clicks, and returns a screenshot afterwards. actions is a list of {key, ms?} (ms = hold, e.g. {"key":"w","ms":2000} walks forward), {look:[dx,dy]} (mouse pixels, ~700 = quarter turn), {click:"left"|"right"}, {wait:ms}, {text:"..."}.', input_schema: obj({ actions: { type: 'array', items: { type: 'object' } } }) },
+  { name: 'playtest_act', write: false, description: 'Playtest: presses/holds keys, moves the mouse to look around, clicks, and returns a screenshot afterwards. actions is a list of {key, ms?} (ms = hold, e.g. {"key":"w","ms":2000} walks forward), {look:[dx,dy]} (mouse pixels, ~700 = quarter turn), {click:"left"|"right"}, {wait:ms}, {text:"..."}.', input_schema: obj({ actions: { type: 'array', items: { type: 'object', properties: { key: S, ms: { type: 'integer' }, look: { type: 'array', items: { type: 'number' } }, click: S, wait: { type: 'integer' }, text: S } } } }) },
   { name: 'playtest_inspect', write: false, games: 'bethesda', description: 'Playtest (Bethesda): opens the console and selects the object under the crosshair (look at it first), optionally runs commands on it (e.g. "getpos x", "disable", "getbaseobject"), returns a screenshot (the console shows the reference ID and, with Better Console / More Informative Console, its plugin) and the console output.', input_schema: obj({ commands: { type: 'array', items: S } }, []) },
   { name: 'playtest_find_location', write: false, games: 'bethesda', description: 'Finds cells by editor ID text in the active load order (for coc), e.g. "Sanctuary", "Diamond", "Whiterun".', input_schema: obj({ query: S }) },
   { name: 'playtest_setup_window', write: true, games: 'bethesda', description: 'Switches the game to borderless windowed (Prefs INI) so screenshots and input work; needed when playtest screenshots come back black.', input_schema: obj({}, []) },
@@ -638,7 +639,8 @@ async function send({ chatId, gameId, text, images = [] }, emit, approve) {
   const chat = chats.get(chatId);
   chat.abort = new AbortController();
   const cfgAll = settings();
-  if (provider(cfgAll) === 'local') return sendLocal({ chat, gameId, text, images }, emit, approve, cfgAll);
+  const prov = provider(cfgAll);
+  if (prov === 'local' || cloud.PROVIDERS[prov]) return sendCompat({ chat, gameId, text, images }, emit, approve, cfgAll, prov);
   const content = [];
   for (const img of images) content.push({ type: 'image', source: { type: 'base64', media_type: img.mediaType, data: img.data } });
   content.push({ type: 'text', text: `${contextLine(gameId)}\n\n${text || '(see screenshots)'}` });
@@ -784,34 +786,86 @@ function shrinkForLocal(base64) {
   }
 }
 
-async function sendLocal({ chat, gameId, text, images }, emit, approve, cfg) {
-  const modelId = engine.resolveModel(cfg.localModel);
-  const st = await engine.status(modelId);
-  if (!st.ready) throw new Error('Shuriken AI is not set up yet. Open Settings → AI assistant and click "Set up Shuriken AI" (one-time download).');
-  if (!st.running) emit({ type: 'status', text: 'Starting Shuriken AI (first answer takes a little longer)…' });
-  if (!chat.local) chat.local = [{ role: 'system', content: LOCAL_PROMPT }];
-  const parts = [{ type: 'text', text: `${contextLine(gameId)}\n\n${text || '(see screenshots)'}` }];
-  for (const img of images) parts.push({ type: 'image_url', image_url: { url: `data:image/jpeg;base64,${shrinkForLocal(img.data)}` } });
-  chat.local.push({ role: 'user', content: images.length ? parts : parts[0].text });
+// Tool schemas for OpenAI-style cloud APIs. Gemini's compatibility layer rejects
+// additionalProperties, so it is dropped everywhere.
+function cloudSchema(schema) {
+  if (!schema || typeof schema !== 'object') return schema;
+  if (Array.isArray(schema)) return schema.map(cloudSchema);
+  const out = {};
+  for (const [k, v] of Object.entries(schema)) if (k !== 'additionalProperties') out[k] = cloudSchema(v);
+  // Gemini only accepts enums on strings.
+  if (out.enum && out.type !== 'string') {
+    out.description = `${out.description ? `${out.description} ` : ''}One of: ${out.enum.join(', ')}.`;
+    delete out.enum;
+  }
+  return out;
+}
+
+function cloudTools(g) {
+  return TOOL_DEFS.filter((t) => toolFits(t, g)).map((t) => ({ type: 'function', function: { name: t.name, description: t.description, parameters: cloudSchema(t.input_schema) } }));
+}
+
+const CLOUD_ADDENDUM = `
+
+You are running on a cloud model chosen by the user. Use search_web, read_web_page, search_nexus, search_wiki and search_github for research (there is no separate built-in web search).`;
+
+// The built-in engine and OpenAI-compatible cloud providers share this loop.
+async function sendCompat({ chat, gameId, text, images }, emit, approve, cfg, prov) {
+  const isLocal = prov === 'local';
+  let modelId;
+  let vision = true;
+  if (isLocal) {
+    modelId = engine.resolveModel(cfg.localModel);
+    const st = await engine.status(modelId);
+    if (!st.ready) throw new Error('Shuriken AI is not set up yet. Open Settings → AI assistant and click "Set up Shuriken AI" (one-time download).');
+    if (!st.running) emit({ type: 'status', text: 'Starting Shuriken AI (first answer takes a little longer)…' });
+  } else {
+    modelId = await cloud.resolveModel(prov);
+    const info = (await cloud.listModels(prov).catch(() => [])).find((m) => m.id === modelId);
+    vision = info ? info.vision : true;
+  }
+  // Custom servers are usually small local models (LM Studio, Ollama): give them the compact setup.
+  const compact = isLocal || prov === 'custom';
+  const system = compact ? LOCAL_PROMPT : SYSTEM_PROMPT + CLOUD_ADDENDUM;
+  if (!chat.local) chat.local = [{ role: 'system', content: system }];
+  chat.local[0] = { role: 'system', content: system }; // the user may have switched provider mid-chat
+  const img = (data) => ({ type: 'image_url', image_url: { url: `data:image/jpeg;base64,${isLocal ? shrinkForLocal(data) : data}` } });
+  const userMsg = (words, imgs) => {
+    if (imgs.length && !vision) return `${words}\n\n[${imgs.length} screenshot(s) attached, but this model cannot see images. Ask the user to describe them, or suggest a vision model.]`;
+    return imgs.length ? [{ type: 'text', text: words }, ...imgs.map((i) => img(i.data))] : words;
+  };
+  chat.local.push({ role: 'user', content: userMsg(`${contextLine(gameId)}\n\n${text || '(see screenshots)'}`, images) });
   const g = mods.game(gameId);
-  const tools = localTools(g);
+  const tools = compact ? localTools(g) : cloudTools(g);
   const ctx = { onChange: () => emit({ type: 'state-changed' }), emit };
+  const turn = (messages) => (isLocal
+    ? engine.chatTurn({ modelId, messages, tools, signal: chat.abort?.signal }, emit)
+    : cloud.chatTurn({ provider: prov, model: modelId, messages, tools, signal: chat.abort?.signal }, emit));
 
   const seen = new Map(); // tool + arguments -> times called this request
-  for (let turn = 0; turn < 60; turn++) {
+  chat.nudged = false;
+  for (let step = 0; step < 60; step++) {
     if (chat.abort?.signal.aborted) break;
-    trimLocalHistory(chat.local);
+    trimLocalHistory(chat.local, compact ? 32000 : 150000);
     let msg;
     try {
-      msg = await engine.chatTurn({ modelId, messages: chat.local, tools, signal: chat.abort?.signal }, emit);
+      msg = await turn(chat.local);
     } catch (e) {
       // The engine rejects the whole conversation if any earlier tool call is broken JSON.
-      if (!/parse tool call arguments/i.test(e.message) || !repairToolHistory(chat.local, true)) throw e;
-      msg = await engine.chatTurn({ modelId, messages: chat.local, tools, signal: chat.abort?.signal }, emit);
+      if (!/parse tool call arguments|invalid.*(json|arguments)/i.test(e.message) || !repairToolHistory(chat.local, true)) throw e;
+      msg = await turn(chat.local);
     }
     for (const call of msg.tool_calls || []) call.function.arguments = fixArgs(call.function.arguments);
     chat.local.push({ role: 'assistant', content: msg.content || '', ...(msg.tool_calls ? { tool_calls: msg.tool_calls } : {}) });
-    if (!msg.tool_calls?.length) break;
+    if (!msg.tool_calls?.length) {
+      // Some models finish their tool work without writing anything: ask once for the answer.
+      if (!msg.content.trim() && step > 0 && !chat.nudged) {
+        chat.nudged = true;
+        chat.local.push({ role: 'user', content: 'Now answer my question using the results above. Be specific and name your sources.' });
+        continue;
+      }
+      break;
+    }
     const shots = [];
     for (const call of msg.tool_calls) {
       if (chat.abort?.signal.aborted) {
@@ -819,32 +873,28 @@ async function sendLocal({ chat, gameId, text, images }, emit, approve, cfg) {
         continue;
       }
       const name = call.function?.name;
-      // Small models sometimes call the same tool with the same input again and again.
+      // Models sometimes call the same tool with the same input again and again.
       const sig = `${name} ${call.function?.arguments || ''}`;
       seen.set(sig, (seen.get(sig) || 0) + 1);
       if (seen.get(sig) > 2 && !/^playtest_(screenshot|act|status)$/.test(name)) {
         chat.local.push({ role: 'tool', tool_call_id: call.id, content: 'You already ran this exact call and got the result above. Do not repeat it: use that result, try a different tool or input, or answer the user now.' });
         continue;
       }
-      const r = await executeTool({ gameId, name, input: call.function?.arguments, id: call.id, cfg, emit, approve, ctx, maxChars: /^(read_web_page|search_wiki)$/.test(name) ? 9000 : 6000 });
+      const big = /^(read_web_page|search_wiki)$/.test(name);
+      const r = await executeTool({ gameId, name, input: call.function?.arguments, id: call.id, cfg, emit, approve, ctx, maxChars: compact ? (big ? 9000 : 6000) : (big ? 30000 : 40000) });
       chat.local.push({ role: 'tool', tool_call_id: call.id, content: r.isError ? `ERROR: ${r.content}` : r.content });
       if (r.image) shots.push(r.image);
     }
-    // The local model sees images only in user messages: keep just the newest game screenshot.
-    if (shots.length) {
+    // Tool results cannot carry images in this API: show the newest screenshot as a user message.
+    if (shots.length && vision) {
       for (const m of chat.local) if (Array.isArray(m.content) && m.content[0]?.text?.startsWith('[Game screenshot')) m.content = '[older game screenshot removed]';
-      chat.local.push({ role: 'user', content: [{ type: 'text', text: '[Game screenshot from the tool above]' }, { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${shrinkForLocal(shots[shots.length - 1].data)}` } }] });
+      chat.local.push({ role: 'user', content: [{ type: 'text', text: '[Game screenshot from the tool above]' }, img(shots[shots.length - 1].data)] });
     }
-    for (const m of takeSteer(chat)) {
-      const parts = [{ type: 'text', text: `The user adds while you work: ${m.text}` }];
-      for (const img of m.images) parts.push({ type: 'image_url', image_url: { url: `data:image/jpeg;base64,${shrinkForLocal(img.data)}` } });
-      chat.local.push({ role: 'user', content: m.images.length ? parts : parts[0].text });
-    }
+    for (const m of takeSteer(chat)) chat.local.push({ role: 'user', content: userMsg(`The user adds while you work: ${m.text}`, m.images) });
     emit({ type: 'turn' });
   }
   emit({ type: 'done' });
 }
-
 
 // ---------- broken tool-call JSON from the local model ----------
 // Small models sometimes stop a tool call mid-string ({"path": "C:\Mods). Try to close it;

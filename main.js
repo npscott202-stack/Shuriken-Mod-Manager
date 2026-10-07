@@ -577,7 +577,7 @@ function registerIpc() {
     return s;
   });
   handle('secrets:set', (key, value) => {
-    if (!['anthropicApiKey', 'nexusApiKey', 'braveSearchKey'].includes(key)) throw new Error('Unknown secret');
+    if (!['anthropicApiKey', 'nexusApiKey', 'braveSearchKey', ...require('./src/core/cloud').keyNames].includes(key)) throw new Error('Unknown secret');
     store.setSecret(key, value);
     return true;
   });
@@ -615,6 +615,13 @@ function registerIpc() {
       pendingApprovals.delete(id);
     }
   };
+  handle('cloud:providers', () => require('./src/core/cloud').publicList());
+  handle('cloud:models', async (id, refresh) => {
+    const c = require('./src/core/cloud');
+    const list = await c.listModels(id, { refresh });
+    return { list, current: await c.resolveModel(id) };
+  });
+  handle('cloud:test', (id) => require('./src/core/cloud').test(id));
   handle('ai:steer', (chatId, text, images) => ai.steer(chatId, text, images || []));
   handle('playtest:status', (gameId) => playtest.status(gameId));
   handle('playtest:stop', (gameId) => playtest.stop(gameId));

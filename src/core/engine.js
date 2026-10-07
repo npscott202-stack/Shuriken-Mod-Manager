@@ -8,6 +8,7 @@ const path = require('path');
 const { spawn, execFile } = require('child_process');
 const store = require('./store');
 const archives = require('./archives');
+const { streamChat } = require('./oaistream');
 
 const MODELS = {
   'qwen3-vl-2b': {
@@ -387,18 +388,6 @@ async function setup(modelId, onProgress) {
 // ---------- chat (OpenAI-compatible streaming) ----------
 // Streams one assistant turn. onEvent receives { type: 'text' | 'thinking', delta }. Returns
 // { content, tool_calls } where tool_calls are OpenAI-style.
-// Small models can get stuck repeating the same sentence. True when the newest text is a chunk
-// that already appeared several times in a row.
-function looping(text) {
-  if (text.length < 240) return false;
-  const tail = text.slice(-60);
-  let count = 0;
-  let from = text.length - 60;
-  const window = Math.max(0, text.length - 1500);
-  while ((from = text.lastIndexOf(tail, from - 1)) >= window) count++;
-  return count >= 3;
-}
-
 // A graphics driver reset kills the running model. Restart it in a lighter mode next time.
 function gpuReset(e, modelId) {
   if (!/DeviceLost|OutOfDeviceMemory|vk::/i.test(e.message)) return e;
@@ -414,75 +403,14 @@ const SAMPLING = { temperature: 0.7, top_p: 0.8, top_k: 20 };
 
 async function chatTurn({ modelId, messages, tools, signal }, onEvent) {
   const s = await start(modelId);
-  const local = new AbortController();
-  const stopLocal = () => local.abort();
-  signal?.addEventListener('abort', stopLocal);
-  let res;
-  try {
-    res = await fetch(`http://127.0.0.1:${s.port}/v1/chat/completions`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ messages, tools, stream: true, ...SAMPLING, max_tokens: 4096 }),
-      signal: local.signal,
-    });
-  } catch (e) {
-    signal?.removeEventListener('abort', stopLocal);
-    throw e;
-  }
-  if (!res.ok) throw new Error(`AI engine error ${res.status}: ${(await res.text()).slice(0, 300)}`);
-  const msg = { role: 'assistant', content: '', tool_calls: [] };
-  let buf = '';
-  const decoder = new TextDecoder();
-  let looped = false;
-  try {
-  for await (const chunk of res.body) {
-    buf += decoder.decode(chunk, { stream: true });
-    let nl;
-    while ((nl = buf.indexOf('\n')) >= 0) {
-      const line = buf.slice(0, nl).trim();
-      buf = buf.slice(nl + 1);
-      if (!line.startsWith('data:')) continue;
-      const data = line.slice(5).trim();
-      if (data === '[DONE]') continue;
-      let ev;
-      try {
-        ev = JSON.parse(data);
-      } catch {
-        continue;
-      }
-      if (ev.error) throw gpuReset(new Error(ev.error.message || String(ev.error)), modelId);
-      const d = ev.choices?.[0]?.delta || {};
-      if (d.reasoning_content) onEvent({ type: 'thinking', delta: d.reasoning_content });
-      if (d.content) {
-        msg.content += d.content;
-        onEvent({ type: 'text', delta: d.content });
-        if (looping(msg.content)) {
-          looped = true;
-          local.abort();
-          break;
-        }
-      }
-      for (const tc of d.tool_calls || []) {
-        const i = tc.index ?? msg.tool_calls.length;
-        const cur = (msg.tool_calls[i] = msg.tool_calls[i] || { id: tc.id || `call_${Date.now()}_${i}`, type: 'function', function: { name: '', arguments: '' } });
-        if (tc.id) cur.id = tc.id;
-        if (tc.function?.name) cur.function.name += tc.function.name;
-        if (tc.function?.arguments) cur.function.arguments += tc.function.arguments;
-      }
-    }
-    if (looped) break;
-  }
-  } catch (e) {
-    if (!looped) throw gpuReset(e, modelId);
-  } finally {
-    signal?.removeEventListener('abort', stopLocal);
-  }
-  if (looped) {
-    onEvent({ type: 'text', delta: '\n\n_(stopped: the answer started repeating itself)_' });
-    msg.tool_calls = [];
-  }
-  msg.tool_calls = msg.tool_calls.filter(Boolean);
-  if (!msg.tool_calls.length) delete msg.tool_calls;
+  const msg = await streamChat({
+    url: `http://127.0.0.1:${s.port}/v1/chat/completions`,
+    body: { messages, tools, ...SAMPLING, max_tokens: 4096 },
+    signal,
+    onEvent,
+    label: 'AI engine',
+    mapError: (e) => gpuReset(e, modelId),
+  });
   bumpIdle();
   return msg;
 }

@@ -117,6 +117,7 @@ const state = {
   page: 'dashboard',
   settings: {},
   keys: {},
+  cloudProviders: [],
   mods: [],
   selectedMod: null,
   downloads: new Map(),
@@ -1072,7 +1073,7 @@ function pageAi() {
   return h('div', { class: 'chat' },
     h('div', { class: 'chat-head' },
       logo('avatar'),
-      h('div', {}, h('div', { class: 'name' }, `Shuriken AI · ${g.short}`), h('div', { class: 'faint small' }, `${aiProvider() === 'local' ? 'Built-in AI · runs on your PC' : `Claude · ${state.settings.aiModel || 'claude-opus-5-5'}`} · reads your mods, load order, logs and screenshots`)),
+      h('div', {}, h('div', { class: 'name' }, `Shuriken AI · ${g.short}`), h('div', { class: 'faint small' }, `${aiLabel()} · reads your mods, load order, logs and screenshots`)),
       h('div', { class: 'grow' }),
       playtestSlot,
       h('button', { class: 'btn small', title: 'Let the AI launch the game, go to a place and look for a problem', onClick: () => startPlaytest(g) }, '🎮 Playtest'),
@@ -1091,7 +1092,7 @@ function pageAi() {
         sendBtn,
         stopBtn,
       ),
-      aiProvider() === 'claude' && !state.keys.anthropic ? h('div', { class: 'small', style: { color: 'var(--warn)', marginTop: '8px' } }, 'Add your Claude API key in Settings, or switch to the free built-in Shuriken AI.') : null,
+      aiNeedsKey() ? h('div', { class: 'small', style: { color: 'var(--warn)', marginTop: '8px' } }, 'Add the API key for the selected AI in Settings → AI assistant, or switch to the free built-in Shuriken AI.') : null,
     ),
   );
 }
@@ -1206,8 +1207,8 @@ async function sendChat() {
     drawChat();
     return;
   }
-  if (aiProvider() === 'claude' && !state.keys.anthropic) {
-    toast('Add your Claude API key in Settings, or switch to the free Local AI.', 'error');
+  if (aiNeedsKey()) {
+    toast('Add the API key for the selected AI in Settings → AI assistant, or switch to the free built-in Shuriken AI.', 'error');
     return;
   }
   const images = chat.attachments.map((a) => ({ mediaType: a.mediaType, data: a.data }));
@@ -1529,6 +1530,87 @@ async function pageDiagnostics() {
   );
 }
 
+
+
+// ---------- Cloud AI providers (Gemini, Groq, OpenRouter, Cerebras, Mistral, OpenAI, custom) ----------
+function cloudBox(id) {
+  const p = state.cloudProviders.find((c) => c.id === id);
+  if (!p) return h('div');
+  const box = h('div');
+  const keyIn = h('input', { class: 'input grow', type: 'password', placeholder: p.hasKey ? '•••••••• saved (enter a new key to replace)' : p.keyOptional ? 'API key (optional for local servers)' : `${p.label} API key` });
+  const urlIn = id === 'custom' ? h('input', { class: 'input', style: { width: '100%', marginBottom: '8px' }, value: state.settings.customBaseUrl || '', placeholder: 'Server address, e.g. http://localhost:1234/v1 (LM Studio) or http://localhost:11434/v1 (Ollama)' }) : null;
+  const modelSel = h('select', { class: 'input grow' }, h('option', {}, p.hasKey || p.keyOptional ? 'Loading models…' : 'Save your key to see the models'));
+  const out = h('div', { class: 'small', style: { marginTop: '8px' } });
+  const loadModels = async (refresh) => {
+    if (!(p.hasKey || p.keyOptional)) return;
+    try {
+      const r = await api.call('cloud:models', id, refresh);
+      modelSel.replaceChildren(...r.list.map((m) => h('option', { value: m.id, selected: m.id === r.current }, `${m.name || m.id}${m.note ? ` · ${m.note}` : ''}${m.vision ? '' : ' · text only'}`)));
+      if (!r.list.length) modelSel.replaceChildren(h('option', {}, 'No usable models for this key'));
+    } catch (e) {
+      modelSel.replaceChildren(h('option', {}, 'Could not load models'));
+      out.replaceChildren(h('span', { style: { color: 'var(--err)' } }, e.message));
+    }
+  };
+  modelSel.addEventListener('change', async () => {
+    const cloudModels = { ...(state.settings.cloudModels || {}), [id]: modelSel.value };
+    state.settings = await api.call('settings:set', { cloudModels });
+    toast(`${p.label}: using ${modelSel.value}`, 'success');
+  });
+  const save = async () => {
+    if (urlIn) state.settings = await api.call('settings:set', { customBaseUrl: urlIn.value.trim() });
+    if (keyIn.value.trim()) {
+      await run(() => api.call('secrets:set', keyNameOf(id), keyIn.value.trim()), 'Key saved');
+      p.hasKey = true;
+    }
+    keyIn.value = '';
+    renderPage();
+  };
+  box.append(...[
+    h('p', { class: 'muted small', style: { marginTop: 0 } }, p.about),
+    urlIn,
+    h('div', { class: 'row' }, keyIn),
+    h('div', { class: 'row wrap', style: { margin: '8px 0 12px' } },
+      h('button', { class: 'btn primary', onClick: save }, 'Save'),
+      p.keyUrl ? h('button', { class: 'btn ghost', onClick: () => api.call('shell:open', p.keyUrl) }, p.tag === 'paid' ? 'Get a key' : 'Get a free key') : null,
+      p.hasKey && !p.keyOptional ? h('button', { class: 'btn ghost danger', onClick: async () => { await api.call('secrets:set', keyNameOf(id), ''); p.hasKey = false; renderPage(); } }, 'Remove key') : null),
+    h('div', { class: 'faint small', style: { marginBottom: '4px' } }, 'Model'),
+    h('div', { class: 'row' }, modelSel,
+      h('button', { class: 'btn small', title: 'Reload the list from the provider', onClick: () => loadModels(true) }, '↻'),
+      h('button', { class: 'btn small', onClick: async () => {
+        out.replaceChildren(h('span', { class: 'muted' }, 'Testing…'));
+        try {
+          const r = await api.call('cloud:test', id);
+          out.replaceChildren(h('span', { style: { color: 'var(--ok)' } }, `✓ ${r.model} answered: "${r.reply}"`));
+        } catch (e) {
+          out.replaceChildren(h('span', { style: { color: 'var(--err)' } }, e.message));
+        }
+      } }, 'Test')),
+    out,
+    h('p', { class: 'faint small', style: { marginTop: '10px' } }, p.tag === 'paid'
+      ? 'Billed by the provider per use. Your key is stored encrypted on this PC and only sent to the provider.'
+      : 'Free tiers have rate limits (requests per minute/day). If you hit one, Shuriken tells you; wait a bit or switch model/provider. Your messages, screenshots and tool results are sent to this provider. Your key is stored encrypted on this PC.')].filter(Boolean));
+  loadModels(false);
+  return box;
+}
+
+const keyNameOf = (id) => ({ gemini: 'geminiApiKey', groq: 'groqApiKey', openrouter: 'openrouterApiKey', cerebras: 'cerebrasApiKey', mistral: 'mistralApiKey', openai: 'openaiApiKey', custom: 'customApiKey' }[id]);
+
+function aiLabel() {
+  const prov = aiProvider();
+  if (prov === 'local') return 'Built-in AI · runs on your PC';
+  if (prov === 'claude') return `Claude · ${state.settings.aiModel || 'claude-opus-5-5'}`;
+  const p = state.cloudProviders.find((c) => c.id === prov);
+  const model = state.settings.cloudModels?.[prov];
+  return `${p ? p.label : prov}${model ? ` · ${model}` : ''}`;
+}
+
+function aiNeedsKey() {
+  const prov = aiProvider();
+  if (prov === 'claude') return !state.keys.anthropic;
+  const p = state.cloudProviders.find((c) => c.id === prov);
+  return !!p && !p.hasKey && !p.keyOptional;
+}
 
 // ---------- AI models: download, switch, manual install ----------
 // Downloads keep running in the background (main process); every open view follows the progress.
@@ -1911,9 +1993,17 @@ async function pageSettings() {
 
   // Engine choice + Shuriken AI (built-in local engine) status.
   const engine = aiProvider();
-  const engineSeg = h('div', { class: 'seg', style: { marginBottom: '14px' } },
-    ...[['local', 'Shuriken AI · free, on your PC'], ['claude', 'Claude · API key']].map(([k, l]) =>
-      h('button', { class: engine === k ? 'on' : '', onClick: async () => { await setS({ aiProvider: k }); renderPage(); } }, l)));
+  const providerPick = h('select', { class: 'input', style: { width: '100%', marginBottom: '12px' } },
+    h('optgroup', { label: 'Free' },
+      h('option', { value: 'local', selected: engine === 'local' }, 'Shuriken AI · built in, offline, on your PC'),
+      ...state.cloudProviders.filter((c) => c.tag !== 'paid' && c.id !== 'custom').map((c) => h('option', { value: c.id, selected: engine === c.id }, `${c.label} · ${c.tag}${c.id === 'gemini' ? ' (recommended)' : ''}`))),
+    h('optgroup', { label: 'Paid (API key)' },
+      h('option', { value: 'claude', selected: engine === 'claude' }, 'Claude (Anthropic) · strongest for modding'),
+      ...state.cloudProviders.filter((c) => c.tag === 'paid').map((c) => h('option', { value: c.id, selected: engine === c.id }, c.label))),
+    h('optgroup', { label: 'Other' },
+      ...state.cloudProviders.filter((c) => c.id === 'custom').map((c) => h('option', { value: c.id, selected: engine === c.id }, c.label))));
+  providerPick.addEventListener('change', async () => { await setS({ aiProvider: providerPick.value }); renderPage(); });
+  const engineSeg = h('div', {}, h('div', { class: 'faint small', style: { marginBottom: '6px' } }, 'Which AI answers in the AI Assistant'), providerPick);
   const localBox = h('div', { class: 'muted small' }, 'Checking Shuriken AI…');
   const drawLocal = async () => {
     try {
@@ -1942,7 +2032,7 @@ async function pageSettings() {
     h('div', { class: 'card' },
       h('h3', {}, '✦ AI assistant'),
       engineSeg,
-      localBox,
+      engine === 'local' ? localBox : engine === 'claude' ? h('div', { class: 'muted small' }, 'Add your Claude API key in the "Claude" card. It is the strongest choice for modding knowledge, playtests and long fixes (pay-as-you-go, a few cents per conversation).') : cloudBox(engine),
       h('div', { class: 'row', style: { marginTop: '16px' } }, toggle(s.aiAutoApprove, (v) => setS({ aiAutoApprove: v })), h('div', {}, h('div', { class: 'name' }, 'Auto-fix'), h('div', { class: 'muted small' }, 'Apply AI fixes without asking. Files are still backed up.'))),
     ),
     h('div', { class: 'card' },
@@ -2285,6 +2375,7 @@ window.addEventListener('keydown', (e) => {
   state.games = init.games;
   state.settings = init.settings;
   state.keys = init.keys;
+  state.cloudProviders = await api.call('cloud:providers').catch(() => []);
   $('#foot').textContent = `Shuriken v${init.version} · ${state.games.filter((g) => g.installDir).length} games found`;
   $('#brandLogo').replaceWith(logo('logo'));
   $('#libraryLink').addEventListener('click', () => go('library'));
